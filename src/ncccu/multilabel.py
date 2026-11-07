@@ -202,22 +202,26 @@ def metrics(labels: np.ndarray, scores: np.ndarray) -> dict:
 
 
 @torch.inference_mode()
-def evaluate(model: torch.nn.Module, loader, device: torch.device, *, quantize: int = 32, channels_last: bool = False, augment: bool = False) -> tuple:
+def evaluate(model: torch.nn.Module, loader, device: torch.device, *, quantize: int = 32, channels_last: bool = False, augment: bool = False, verbose: bool = False) -> tuple:
+    from ultralytics.utils import TQDM
+
     model.eval()
     probabilities = np.empty((len(loader.dataset), 10), dtype=np.float32)
     total = 0.0
-    for images, targets, indices in loader:
-        images = images.to(device)
-        if channels_last:
-            images = images.contiguous(memory_format=torch.channels_last)
-        with torch.autocast(device_type=device.type, enabled=quantize == 16):
-            output = logits(model, images).float()
-            probability = output.sigmoid()
-            if augment:
-                probability = (probability + logits(model, images.flip(-1)).float().sigmoid()) / 2
-        if not torch.isfinite(output).all():
-            raise ValueError("预测出现非有限数值")
-        total += torch.nn.functional.binary_cross_entropy_with_logits(
-            output, targets.to(device), reduction="sum").item()
-        probabilities[indices.numpy()] = probability.cpu().numpy()
+    with TQDM(loader, desc="Validating", total=len(loader), disable=not verbose) as progress:
+        for images, targets, indices in progress:
+            images = images.to(device, non_blocking=device.type == "cuda")
+            targets = targets.to(device, non_blocking=device.type == "cuda")
+            if channels_last:
+                images = images.contiguous(memory_format=torch.channels_last)
+            with torch.autocast(device_type=device.type, enabled=quantize == 16):
+                output = logits(model, images).float()
+                probability = output.sigmoid()
+                if augment:
+                    probability = (probability + logits(model, images.flip(-1)).float().sigmoid()) / 2
+            if not torch.isfinite(output).all():
+                raise ValueError("预测出现非有限数值")
+            total += torch.nn.functional.binary_cross_entropy_with_logits(
+                output, targets, reduction="sum").item()
+            probabilities[indices.numpy()] = probability.cpu().numpy()
     return probabilities, total / (len(loader.dataset) * 10)

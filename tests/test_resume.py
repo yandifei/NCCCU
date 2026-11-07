@@ -1,5 +1,7 @@
 """真实模型验证完整训练与中断恢复得到相同权重。"""
 import csv
+import io
+from contextlib import redirect_stdout
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,7 +38,11 @@ class ResumeTests(unittest.TestCase):
             config = dict(model=weights, data=data, epochs=2, batch=2, imgsz=64,
                           dropout=0.2, device="cpu", workers=0, amp=False)
             with patch.object(multilabel, "ROOT", root):
-                complete = training.train_multilabel(**config, name="complete")
+                console = io.StringIO()
+                with redirect_stdout(console):
+                    complete = training.train_multilabel(**config, name="complete")
+                for column in ("Epoch", "GPU_mem", "BCE_loss", "Instances", "Size", "Macro-AUC", "Best-AUC", "Delta", "100%"):
+                    self.assertIn(column, console.getvalue())
                 evaluate = training.evaluate
                 calls = 0
 

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from ultralytics.nn.tasks import ClassificationModel
+from ultralytics.utils import TQDM
 from ncccu.runtime import configure_randomness, seed_worker, validate_fixed, plot_history
 from ncccu.train_options import TRAIN_FIXED, training_transform, make_optimizer, set_warmup
 
@@ -157,8 +158,10 @@ def train_multilabel(
     if args.channels_last:
         model.to(memory_format=torch.channels_last)
     train.transform = training_transform(args)
-    training = DataLoader(train, batch_size=args.batch, shuffle=True, num_workers=args.workers, worker_init_fn=seed_worker)
-    validation = DataLoader(valid, batch_size=args.batch, num_workers=args.workers, worker_init_fn=seed_worker)
+    # CUDA 固定内存配合异步传输；保持每轮重新播种，兼容精确断点恢复。
+    loader_options = dict(num_workers=args.workers, worker_init_fn=seed_worker, pin_memory=device.type == "cuda")
+    training = DataLoader(train, batch_size=args.batch, shuffle=True, **loader_options)
+    validation = DataLoader(valid, batch_size=args.batch, **loader_options)
     optimizer = make_optimizer(model, args)
     if args.cos_lr:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=args.lr0 * args.lrf)
@@ -199,8 +202,10 @@ def train_multilabel(
         write_history(history, run)
     started = clock.monotonic()
     for epoch in range(start_epoch, args.epochs):
+        epoch_started = clock.monotonic()
         if args.verbose:
             print(f"[训练] 第 {epoch+1}/{args.epochs} 轮，等待首批数据（workers={args.workers}）", flush=True)
+            print("\n" + "%11s" * 5 % ("Epoch", "GPU_mem", "BCE_loss", "Instances", "Size"), flush=True)
         model.train()
         for layer in model.model[:args.freeze]:
             layer.eval()
@@ -210,30 +215,40 @@ def train_multilabel(
             else:
                 group["momentum"] = args.momentum
         total = 0.0
-        for step, (images, targets, _) in enumerate(training):
-            if step % accumulation == 0:
-                optimizer.zero_grad(set_to_none=True)
-            set_warmup(optimizer, args, epoch, step, len(training))
-            if args.plots and epoch == start_epoch and step == 0:
-                from torchvision.utils import save_image
-                save_image(images[:16], run / "train_batch0.jpg", nrow=4)
-            images = images.to(device)
-            if args.channels_last:
-                images = images.contiguous(memory_format=torch.channels_last)
-            with torch.autocast(device_type=device.type, enabled=use_amp):
-                output = logits(model, images.to(device))
-                loss = args.cls * torch.nn.functional.binary_cross_entropy_with_logits(output, targets.to(device), pos_weight=positive_weight)
-            if not torch.isfinite(loss):
-                raise ValueError("训练损失非有限数值")
-            chunk_start = (step // accumulation) * accumulation * args.batch
-            chunk_samples = min(accumulation * args.batch, len(train)-chunk_start)
-            scaler.scale(loss * len(images) / chunk_samples).backward()
-            if (step+1) % accumulation == 0 or step+1 == len(training):
-                scaler.step(optimizer)
-                scaler.update()
-            total += loss.item() * len(images)
-            if args.verbose and step % 50 == 0:
-                print(f"epoch={epoch+1} batch={step+1}/{len(training)} loss={loss.item():.5f}", flush=True)
+        with TQDM(enumerate(training), total=len(training), disable=not args.verbose) as progress:
+            for step, (images, targets, _) in progress:
+                if step % accumulation == 0:
+                    optimizer.zero_grad(set_to_none=True)
+                set_warmup(optimizer, args, epoch, step, len(training))
+                if args.plots and epoch == start_epoch and step == 0:
+                    from torchvision.utils import save_image
+                    save_image(images[:16], run / "train_batch0.jpg", nrow=4)
+                images = images.to(device, non_blocking=device.type == "cuda")
+                targets = targets.to(device, non_blocking=device.type == "cuda")
+                if args.channels_last:
+                    images = images.contiguous(memory_format=torch.channels_last)
+                with torch.autocast(device_type=device.type, enabled=use_amp):
+                    output = logits(model, images)
+                    loss = args.cls * torch.nn.functional.binary_cross_entropy_with_logits(output, targets, pos_weight=positive_weight)
+                if not torch.isfinite(loss):
+                    raise ValueError("训练损失非有限数值")
+                chunk_start = (step // accumulation) * accumulation * args.batch
+                chunk_samples = min(accumulation * args.batch, len(train)-chunk_start)
+                scaler.scale(loss * len(images) / chunk_samples).backward()
+                if (step+1) % accumulation == 0 or step+1 == len(training):
+                    scaler.step(optimizer)
+                    scaler.update()
+                total += loss.item() * len(images)
+                if args.verbose:
+                    seen = min((step+1) * args.batch, len(train))
+                    memory = torch.cuda.memory_reserved(device) / 2**30 if device.type == "cuda" else 0.0
+                    progress.set_description(
+                        "%11s%11s%11.5g%11d%11d"
+                        % (f"{epoch+1}/{args.epochs}", f"{memory:.3g}G", total/seen, len(images), args.imgsz)
+                    )
+        if args.verbose:
+            elapsed = clock.monotonic() - epoch_started
+            print(f"[速度] 训练 {len(train)/max(elapsed, 1e-6):.1f} 张/秒，耗时 {elapsed:.1f} 秒（含批次加载）", flush=True)
         # 预热逐批覆盖 lr；轮次调度始终从该轮的目标学习率推进。
         factor = ((1+math.cos(math.pi*epoch/args.epochs))/2 if args.cos_lr else 1-epoch/args.epochs)
         for group in optimizer.param_groups:
@@ -241,19 +256,29 @@ def train_multilabel(
         scheduler.step()
         if args.verbose:
             print(f"[验证] 第 {epoch+1} 轮，{len(valid)} 张影像", flush=True)
-        probabilities, val_loss = evaluate(model, validation, device, channels_last=args.channels_last)
-        _, scores, labels = aggregate(valid, probabilities)
+        probabilities, val_loss = evaluate(model, validation, device, channels_last=args.channels_last, verbose=args.verbose)
+        study_keys, scores, labels = aggregate(valid, probabilities)
         result = metrics(labels, scores)
         if result["auc_classes"] != 10 and not args.smoke_test:
             raise ValueError("验证集须包含全部10类的正负样本，无法计算完整 Macro-AUC")
         row = dict(epoch=epoch+1, train_loss=total/len(train), val_loss=val_loss, **result)
         history.append(row)
-        if args.verbose:
-            print(row, flush=True)
         score = result["macro_auc"] if result["macro_auc"] is not None else -val_loss
         improved = score > best
         best = max(best, score)
         stale = 0 if improved else stale + 1
+        if args.verbose:
+            previous = history[-2]["macro_auc"] if len(history) > 1 else None
+            auc = result["macro_auc"]
+            delta = f"{auc-previous:+.5f}" if auc is not None and previous is not None else "--"
+            best_auc = max((item["macro_auc"] for item in history if item["macro_auc"] is not None), default=None)
+            best_text = f"{best_auc:.5f}" if best_auc is not None else "--"
+            auc_text = f"{auc:.5f}" if auc is not None else "--"
+            print("%11s" * 7 % ("Studies", "Val_loss", "Macro-AUC", "Macro-F1", "Best-AUC", "Delta", "Stale"), flush=True)
+            print("%11d%11.5g%11s%11.5g%11s%11s%11d" % (
+                len(study_keys), val_loss, auc_text, result["macro_f1"], best_text, delta, stale), flush=True)
+            if improved:
+                print("[最佳] 本轮验证指标刷新历史最佳" + ("，更新 best.pt" if args.save else ""), flush=True)
         checkpoint = {
             "format": "ncccu-multilabel-v1", "classes": list(CLASS_NAMES),
             "architecture": model.yaml,
