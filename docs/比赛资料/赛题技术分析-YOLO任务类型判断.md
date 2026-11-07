@@ -123,14 +123,14 @@
 | test | 2 218 | 1 414 | 136 | **无标签列** |
 
 - 一个检查平均约 1.64 张图（train），所以「图像数 ≠ 检查数」，提交按检查聚合。
-- 已生成逐图 txt 标签（0-based）：`datasets/labels/`，脚本见 [tools/csv2txt.py](../../tools/csv2txt.py)，用法与统计见 [数据集标签转换说明.md](../数据集标签转换说明.md)。
-- ⚠️ `datasets/data.yaml` 已改写为本赛题的自定义配置（`task: multi_label_classification`、10 类、官方 id 映射、影像/标签/CSV 路径），由自定义多标签 Dataset 读取；它**不是** Ultralytics 原生任务配置，`yolo detect/classify train` 仍然用不了。
 
 ---
+
+数据直接读取官方 CSV，路径与标签约定见 [数据集读取说明](../数据集读取说明.md)。
 
 ## 八、参考
 
 - Ultralytics 图像分类任务文档（YOLO26-cls 使用 `-cls` 后缀、ImageNet 预训练、默认 softmax 单标签）：<https://docs.ultralytics.com/tasks/classify/>
-- 本仓库既有资料：[Ultralytics 训练参数参考](../Ultralytics训练参数参考.md)、[Ultralytics 预测参数参考](../Ultralytics预测参数参考.md)
+- 本仓库既有资料：[Ultralytics 训练参数参考](../Ultralytics分类训练参数参考.md)、[Ultralytics 预测参数参考](../Ultralytics分类预测参数参考.md)
 - 官方赛题页：<http://www.ncccu.org.cn/index/Paper/case1.html>
 - 规则原文：[比赛参赛规则（官方PDF转写）](比赛参赛规则（官方PDF转写）.md)、[参赛规则补充说明（官方PDF转写）](参赛规则补充说明（官方PDF转写）.md)

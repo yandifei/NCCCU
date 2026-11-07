@@ -4,10 +4,10 @@
 
 ## 目录与文件
 
-- `docs/` 存放所有项目文档，包括赛事规则、赛题分析、数据转换说明和框架参考。根目录保留仓库指南 `AGENTS.md` 和打包元数据引用的 `README.md`，具体说明集中在 `docs/`。
+- `docs/` 存放所有项目文档，包括赛事规则、赛题分析、数据读取说明和框架参考。根目录保留仓库指南 `AGENTS.md` 和打包元数据引用的 `README.md`，具体说明集中在 `docs/`。
 - `pretrain_model/` 存放预训练模型权重。按赛事规则使用允许的非医学领域开源权重。
 - `model/` 存放本地训练产出的模型权重。
-- `tools/` 存放独立工具脚本，例如标签格式转换和提交材料打包。`tools/csv2txt.py` 将官方 CSV 转换为逐图标签和清单。
+- `tools/` 存放独立工具脚本，例如数据检查和提交材料打包。官方 CSV 是训练标签的直接来源。
 - `src/` 存放可复用的训练相关代码，例如数据加载、模型头改造（本赛题使用多标签分类头）、损失函数和评估逻辑。可安装包位于 `src/ncccu/`，当前 CLI 打印问候语。
 - 根目录的 `train.py` 和 `predict.py` 分别作为训练和推理入口。当前 `train.py` 为空，`predict.py` 用于检查 PyTorch 和 CUDA。
 - `datasets/` 存放赛事官方数据集。按赛事方规则保留全部官方样本，禁止新增、删除或替换样本。标签格式转换只生成派生标签和清单，保留原始影像和官方 CSV。
@@ -23,21 +23,20 @@
 - `uv sync` 安装项目和锁定的依赖。
 - `uv run ncccu` 运行包入口。
 - `uv build` 构建源码分发包和 wheel。
-- `uv run python tools/csv2txt.py --dry-run --limit 100` 用本地 CSV 和影像检查小批样本，不写入标签。
-- `uv run python tools/csv2txt.py` 为 `train` 和 `valid` 生成标签。
+- `uv run --no-sync python tools/check_dataset.py` 只读检查官方 CSV 和影像路径。
 - `uv run --no-sync python predict.py` 检查现有环境的 PyTorch 和 CUDA。脚本会直接查询设备 0，因此当前实现要求 CUDA 可用。
 
 ## 代码与验证
 
 - Python 使用四空格缩进，函数和变量使用 `snake_case`，常量使用 `UPPER_CASE`。新增接口使用类型注解，文件路径使用 `pathlib.Path`，读写文本时显式指定 UTF-8。
 - 当前没有配置格式化工具、静态检查工具、自动化测试框架或覆盖率门槛。
-- 修改转换器后，先运行限量试跑，再用独立的小型测试样例检查生成标签。覆盖重复标签、无效类别 ID、影像缺失和无标签测试 CSV。新增自动化测试使用 `tests/test_*.py`，并在 `docs/` 记录依赖和运行命令。
+- 修改数据读取逻辑后，检查重复标签、无效 ID、缺失影像和无标签测试 CSV。使用独立临时样例验证失败路径，在 docs/ 记录验证命令。
 
 ## 数据与配置
 
 - 保留官方类别 ID `1–10`，记录内部索引 `0–9` 与官方 ID 的映射。按多标签语义处理标签。
 - 测试集仅用于推理。验证集若按赛事规则并入训练，此后不得再用于选模、早停或调参。
-- `datasets/data.yaml` 是本赛题的自定义配置（`task: multi_label_classification`、10 类、官方 id 1–10 ↔ 索引 0–9、影像/标签/CSV 路径），供自定义多标签 Dataset 读取；它不是 Ultralytics 原生任务配置，不能直接用于 `yolo detect/classify train`。
+- 训练数据直接从官方 CSV 读取，类别 ID 减 1 转成内部索引，并构造 10 维 multi-hot 向量。
 - 原始数据、医学影像、模型权重及生成产物不得提交到 Git。
 
 ## 提交与拉取请求

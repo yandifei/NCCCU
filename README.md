@@ -29,7 +29,7 @@
 
 胸片是筛查肺部疾病最常用、最经济的影像手段，但人工阅片主观性强、耗时耗力。本届赛题要求基于官方标注的胸片数据，做**多标签**疾病分类：一张片子可以同时存在多种病变，模型需要对 10 个类别**各自独立**输出概率，而不是从 10 类里选一个。
 
-本仓库是完整的参赛工程：数据清点与标签转换、数据集配置、多标签训练链路、检查级聚合与提交产物，全部在此沉淀，文档统一收在 [`docs/`](docs/)。
+本仓库是完整的参赛工程：官方 CSV 读取与数据检查、多标签训练链路、检查级聚合与提交产物，全部在此沉淀，文档统一收在 [`docs/`](docs/)。
 
 > ⚠️ 关键认知：赛题文案里的「检测与分类」是医学语境的泛称，**实际评分只考察分类**——没有 bbox / mask 标注，提交格式与指标都是「检查级 × 10 类概率」。判定过程见 [赛题技术分析](docs/比赛资料/赛题技术分析-YOLO任务类型判断.md)。
 
@@ -61,15 +61,15 @@
 | 9 | 胸腔积液 | Pleural Effusion |
 | 10 | 无异常发现 | No Finding |
 
-官方 id 是 `1–10`，代码内部统一用 `0–9` 索引，映射写在 [`datasets/data.yaml`](datasets/data.yaml) 的 `official_id_to_index` 里。
+官方 id 是 `1–10`，代码内部统一用 `0–9` 索引，转换规则为索引 = 官方 id − 1。
 
 ## 🧠 技术方案
 
 ```text
 官方 CSV (Predict_class，分号多标签)
-        │  tools/csv2txt.py
+        │  直接解析分号分隔的类别 ID
         ▼
-datasets/labels/**/*.txt  ──►  自定义 Dataset（10 维 multi-hot）
+自定义 Dataset（10 维 multi-hot，待实现）
                                       │
                                       ▼
                  yolo26*-cls 骨干（ImageNet 权重，非医学，合规）
@@ -98,10 +98,8 @@ datasets/labels/**/*.txt  ──►  自定义 Dataset（10 维 multi-hot）
 ```text
 NCCCU/
 ├── src/ncccu/            # 可复用代码：数据层、模型头改造、损失、评估
-├── tools/
-│   ├── csv2txt.py        # 官方 CSV → 逐图 txt 标签 + manifest
-│   └── README.md         # 工具指引（文档统一收在 docs/）
-├── datasets/             # 官方数据（不入库）：影像、CSV、派生标签、data.yaml
+├── tools/check_dataset.py # 官方 CSV 与影像路径只读检查
+├── datasets/             # 官方影像与 CSV（不入库）
 ├── pretrain_model/       # 非医学预训练权重 yolo26n/s/m/l/x-cls.pt（不入库）
 ├── model/                # 本地训练产出（不入库）
 ├── docs/                 # 全部文档：赛制、数据分析、参数参考
@@ -133,18 +131,16 @@ datasets/
 ├── train.csv / valid.csv / test.csv      # test.csv 无 Predict_class 列
 ├── train/{Subject_id}/{Study_id}/{Dicom_id}.jpg
 ├── valid/{Subject_id}/{Study_id}/{Dicom_id}.jpg
-├── test/{Subject_id}/{Study_id}/{Dicom_id}.jpg
-└── data.yaml                             # 本项目自定义配置
+└── test/{Subject_id}/{Study_id}/{Dicom_id}.jpg
 ```
 
-### 3. 生成逐图标签
+### 3. 检查官方数据
 
-```bash
-uv run python tools/csv2txt.py --dry-run --limit 100   # 先小批试跑，不写文件
-uv run python tools/csv2txt.py                         # 生成 train + valid
-```
+~~~bash
+uv run --no-sync python tools/check_dataset.py
+~~~
 
-产出 `datasets/labels/`：每图一个 `.txt`（如 `2 4 5 8`）、`classes.txt`、`train_manifest.csv`、`valid_manifest.csv`。参数与实测结果见 [数据集标签转换说明](docs/数据集标签转换说明.md)。
+训练和验证直接读取 CSV 标签，读取约定见 [数据集读取说明](docs/数据集读取说明.md)。
 
 ### 4. 训练与推理
 
@@ -153,15 +149,9 @@ uv run python train.py      # 🚧 训练入口尚未实现
 uv run python predict.py    # 当前仅打印环境信息
 ```
 
-## ⚙️ 配置说明
+## ⚙️ 数据读取
 
-[`datasets/data.yaml`](datasets/data.yaml) 是本项目的**自定义**配置，由自写 Dataset 读取：10 类名、官方 id ↔ 索引映射、影像 / 标签 / CSV 路径、实测规模、提交约定。
-
-它**不是** Ultralytics 原生任务配置，不能交给 `yolo` 训练：
-
-- `detect / segment / pose / obb` 需要 bbox / 多边形，本赛只有图像级多标签；
-- `classify` 只认 ImageFolder 目录（`data=目录`，不读 yaml），且一图只能一个类别；
-- 当前 Ultralytics 8.4.204 没有多标签分类任务，源码中不存在 multi-label 支持。
+官方 CSV 和现有影像目录作为输入。自定义多标签 Dataset 与训练循环尚待实现，读取约定见 [数据集读取说明](docs/数据集读取说明.md)。
 
 ## ✅ 合规红线
 
@@ -190,16 +180,14 @@ uv run python predict.py    # 当前仅打印环境信息
 | [比赛规则文档](docs/比赛资料/比赛规则文档.md) | 赛制、任务、数据、指标、提交要求的完整整理 |
 | [比赛参赛规则](docs/比赛资料/比赛参赛规则.md) / [补充说明](docs/比赛资料/参赛规则补充说明.md) | 官方 PDF 的文本转写 |
 | [赛题技术分析](docs/比赛资料/赛题技术分析-YOLO任务类型判断.md) | 为什么这是分类不是检测，以及建模方案对比 |
-| [数据集标签转换说明](docs/数据集标签转换说明.md) | `csv2txt.py` 用法、输出结构与实测统计 |
-| [Ultralytics 训练参数参考](docs/Ultralytics训练参数参考.md) | 训练参数逐项说明 |
-| [Ultralytics 预测参数参考](docs/Ultralytics预测参数参考.md) | 推理与导出参数逐项说明 |
+| [数据集读取说明](docs/数据集读取说明.md) | 官方 CSV、多标签映射及检查命令 |
+| [Ultralytics 训练参数参考](docs/Ultralytics分类训练参数参考.md) | 训练参数逐项说明 |
+| [Ultralytics 预测参数参考](docs/Ultralytics分类预测参数参考.md) | 推理与导出参数逐项说明 |
 | [AGENTS.md](AGENTS.md) | 仓库目录约定、代码风格与提交规范 |
 
 ## 🗺 路线图
 
 - [x] 数据清点：影像、CSV、标注完整性核对
-- [x] 逐图标签转换：`tools/csv2txt.py` + 30 344 / 1 422 张标签
-- [x] 数据集配置：`datasets/data.yaml`
 - [ ] 多标签 `Dataset`：三级目录读取 + 10 维 multi-hot + 增强
 - [ ] 训练循环：骨干加载、10 维 sigmoid 头、BCE / ASL、AMP
 - [ ] 评估：Macro-AUC 选模 + Study 聚合策略对比
