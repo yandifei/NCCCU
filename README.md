@@ -117,7 +117,7 @@ NCCCU/
 
 ```bash
 uv sync                                   # 安装并锁定依赖
-uv run --no-sync python train.py --help   # 查看训练参数
+# 在 train.py 中直接修改训练参数
 ```
 
 
@@ -144,8 +144,8 @@ uv run --no-sync python tools/check_dataset.py
 ### 4. 训练与推理
 
 ```bash
-uv run --no-sync python train.py --name baseline
-uv run --no-sync python predict.py --model outputs/train/baseline/weights/best.pt
+uv run --no-sync python train.py
+uv run --no-sync python predict.py  # 先在文件中填写 model 权重路径
 ```
 
 ## ⚙️ 数据读取
