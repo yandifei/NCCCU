@@ -1,0 +1,29 @@
+[project]
+name = "ncccu"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "yandifei", email = "3058439878@qq.com" }
+]
+requires-python = ">=3.15.2"
+dependencies = [
+    "torch>=2.15.0",
+    "torchvision>=0.29.2",
+    "ultralytics>=8.4.204",
+]
+
+[project.scripts]
+ncccu = "ncccu:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu134"
