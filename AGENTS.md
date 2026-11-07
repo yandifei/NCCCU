@@ -6,17 +6,17 @@
 
 - `docs/` 存放所有项目文档，包括赛事规则、赛题分析、数据读取说明和框架参考。根目录保留仓库指南 `AGENTS.md` 和打包元数据引用的 `README.md`，具体说明集中在 `docs/`。
 - `pretrain_model/` 存放预训练模型权重。按赛事规则使用允许的非医学领域开源权重。
-- `model/` 存放本地训练产出的模型权重。
+- `outputs/` 存放全部运行产物。训练权重和记录写入 `outputs/train/<name>/`，预测结果写入 `outputs/predict/<name>/`，禁止提交 Git。
 - `tools/` 存放独立工具脚本，例如数据检查和提交材料打包。官方 CSV 是训练标签的直接来源。
 - `src/` 存放可复用的训练相关代码，例如数据加载、模型头改造（本赛题使用多标签分类头）、损失函数和评估逻辑。可安装包位于 `src/ncccu/`，当前 CLI 打印问候语。
-- 根目录的 `train.py` 和 `predict.py` 分别作为训练和推理入口。当前 `train.py` 为空，`predict.py` 用于检查 PyTorch 和 CUDA。
+- 根目录的 `train.py` 和 `predict.py` 分别作为训练和推理入口。训练读取官方 CSV，使用多标签 BCE 损失；预测按 Study 聚合并导出 CSV。
 - `datasets/` 存放赛事官方数据集。按赛事方规则保留全部官方样本，禁止新增、删除或替换样本。标签格式转换只生成派生标签和清单，保留原始影像和官方 CSV。
 
 ## 开发环境与命令
 
 项目通过 `uv` 管理依赖，`pyproject.toml` 要求 Python `>=3.15.2`，构建后端为 `uv_build`（`>=0.13.7,<0.14.0`）。`uv.lock` 锁定的直接依赖为 PyTorch `2.15.0`、torchvision `0.29.2` 和 Ultralytics `8.4.204`。
 
-本机开发环境使用 Python `3.15.2` 和 NVIDIA GeForce RTX 5080。GPU 环境使用 PyTorch `2.15.0+cu134`。安装或同步依赖后，用 `uv run --no-sync python predict.py` 核实 CUDA 可用且识别到 GPU。
+本机开发环境使用 Python `3.15.2` 和 NVIDIA GeForce RTX 5080。GPU 环境使用 PyTorch `2.15.0+cu134`。训练默认使用可用 CUDA 设备，否则使用 CPU；可通过 `--device` 显式指定。
 
 在仓库根目录执行以下命令。
 
@@ -24,7 +24,9 @@
 - `uv run ncccu` 运行包入口。
 - `uv build` 构建源码分发包和 wheel。
 - `uv run --no-sync python tools/check_dataset.py` 只读检查官方 CSV 和影像路径。
-- `uv run --no-sync python predict.py` 检查现有环境的 PyTorch 和 CUDA。脚本会直接查询设备 0，因此当前实现要求 CUDA 可用。
+- `uv run --no-sync python train.py --name baseline` 启动训练。
+- `uv run --no-sync python predict.py --model outputs/train/baseline/weights/best.pt` 对官方测试集推理。
+- 参数与冒烟验证命令见 `docs/训练与推理说明.md`。
 
 ## 代码与验证
 

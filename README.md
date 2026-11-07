@@ -69,7 +69,7 @@
 官方 CSV (Predict_class，分号多标签)
         │  直接解析分号分隔的类别 ID
         ▼
-自定义 Dataset（10 维 multi-hot，待实现）
+自定义 Dataset（10 维 multi-hot）
                                       │
                                       ▼
                  yolo26*-cls 骨干（ImageNet 权重，非医学，合规）
@@ -101,10 +101,10 @@ NCCCU/
 ├── tools/check_dataset.py # 官方 CSV 与影像路径只读检查
 ├── datasets/             # 官方影像与 CSV（不入库）
 ├── pretrain_model/       # 非医学预训练权重 yolo26n/s/m/l/x-cls.pt（不入库）
-├── model/                # 本地训练产出（不入库）
+├── outputs/              # 权重、训练记录、预测 CSV（不入库）
 ├── docs/                 # 全部文档：赛制、数据分析、参数参考
-├── train.py              # 训练入口（🚧 待实现）
-├── predict.py            # 推理入口 / 环境自检
+├── train.py              # 多标签训练入口
+├── predict.py            # 检查级概率预测入口
 ├── pyproject.toml        # uv 依赖与构建配置
 └── AGENTS.md             # 仓库协作与代码规范
 ```
@@ -117,10 +117,9 @@ NCCCU/
 
 ```bash
 uv sync                                   # 安装并锁定依赖
-uv run --no-sync python predict.py        # 自检：PyTorch 版本、CUDA、GPU 型号
+uv run --no-sync python train.py --help   # 查看训练参数
 ```
 
-> ⚠️ 装完先看 `predict.py` 的输出。本地 `.venv` 若被解析成 `2.15.0+cpu`，CUDA 会显示不可用，训练前务必确认是 GPU 版本。
 
 ### 2. 数据
 
@@ -145,13 +144,13 @@ uv run --no-sync python tools/check_dataset.py
 ### 4. 训练与推理
 
 ```bash
-uv run python train.py      # 🚧 训练入口尚未实现
-uv run python predict.py    # 当前仅打印环境信息
+uv run --no-sync python train.py --name baseline
+uv run --no-sync python predict.py --model outputs/train/baseline/weights/best.pt
 ```
 
 ## ⚙️ 数据读取
 
-官方 CSV 和现有影像目录作为输入。自定义多标签 Dataset 与训练循环尚待实现，读取约定见 [数据集读取说明](docs/数据集读取说明.md)。
+官方 CSV 和现有影像目录作为输入。自定义 Dataset 直接读取 CSV。运行参数见 [训练与推理说明](docs/训练与推理说明.md)，读取约定见 [数据集读取说明](docs/数据集读取说明.md)。
 
 ## ✅ 合规红线
 
@@ -188,9 +187,9 @@ uv run python predict.py    # 当前仅打印环境信息
 ## 🗺 路线图
 
 - [x] 数据清点：影像、CSV、标注完整性核对
-- [ ] 多标签 `Dataset`：三级目录读取 + 10 维 multi-hot + 增强
-- [ ] 训练循环：骨干加载、10 维 sigmoid 头、BCE / ASL、AMP
-- [ ] 评估：Macro-AUC 选模 + Study 聚合策略对比
+- [x] 多标签 Dataset：三级目录读取、10 维 multi-hot、等比例缩放填充
+- [x] 训练循环：预训练骨干、10 维 logits、BCE、AMP
+- [x] 评估：Study 均值聚合、Macro-AUC 选模与 Macro-F1
 - [ ] 提交链路：`submission.csv` 导出、`cost.py`、100 张一致性核验
 - [ ] 部署：ONNX / TensorRT 导出、100 ms 实测、500 MB 体积核算
 - [ ] 合规材料：许可证、SHA-256、model card、清单 xlsx、`code/` 打包
