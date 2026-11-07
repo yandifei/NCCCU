@@ -21,6 +21,10 @@ CLASS_NAMES = (
 class ChestDataset(Dataset):
     def __init__(self, root: Path, split: str, imgsz: int, smoke: bool = False):
         self.root, self.split, self.imgsz = root, split, imgsz
+        self.cache_dir = None
+        self.memory_cache = {}
+        self.cache = False
+        self.transform = None
         with (root / f"{split}.csv").open(encoding="utf-8-sig", newline="") as file:
             reader = csv.DictReader(file)
             required = {"Subject_id", "Study_id", "Dicom_id"}
@@ -64,11 +68,36 @@ class ChestDataset(Dataset):
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, index: int) -> tuple:
+    def read_image(self, index: int) -> np.ndarray:
         with Image.open(self.image_path(self.rows[index])) as source:
             image = ImageOps.pad(source.convert("RGB"), (self.imgsz, self.imgsz),
                                  method=Image.Resampling.BILINEAR, color=(114, 114, 114))
-            tensor = torch.from_numpy(np.asarray(image).copy()).permute(2, 0, 1).float() / 255
+            return np.asarray(image).copy()
+
+    def prepare_cache(self, mode: bool | str, directory: Path) -> None:
+        if mode not in (False, True, "ram", "disk"):
+            raise ValueError("cache 必须为 False、True、ram 或 disk")
+        self.cache = mode
+        self.cache_dir = directory
+        if mode == "disk":
+            directory.mkdir(parents=True, exist_ok=False)
+            # 每次运行拥有独立缓存，避免读到旧数据或并发覆盖。
+            for index in range(len(self)):
+                np.save(directory / f"{index}.npy", self.read_image(index))
+        elif mode:
+            self.memory_cache = {index: self.read_image(index) for index in range(len(self))}
+
+    def __getitem__(self, index: int) -> tuple:
+        if self.cache == "disk":
+            image = np.load(self.cache_dir / f"{index}.npy", allow_pickle=False)
+        elif self.cache:
+            image = self.memory_cache[index].copy()
+        else:
+            image = self.read_image(index)
+        if self.transform is not None:
+            tensor = self.transform(Image.fromarray(image))
+        else:
+            tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255
         return tensor, self.targets[index], index
 
 
@@ -106,11 +135,14 @@ def device_for(value: str | int) -> torch.device:
     return torch.device(f"cuda:{value}" if value.isdigit() else value)
 
 
-def output_dir(kind: str, name: str | None) -> Path:
+def output_dir(kind: str, name: str | None, project: str | Path | None = None, save_dir: str | Path | None = None) -> Path:
     name = name or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     if not name or Path(name).name != name or name in {".", ".."} or any(c in name for c in "/\\:"):
         raise ValueError("name 必须是单层目录名")
-    path = ROOT / "outputs" / kind / name
+    project = ROOT / project if project is not None else ROOT / "outputs" / kind
+    path = (ROOT / save_dir if save_dir is not None else project / name).resolve()
+    if not path.is_relative_to((ROOT / "outputs").resolve()):
+        raise ValueError("全部产出必须位于 outputs 目录内")
     path.mkdir(parents=True, exist_ok=False)
     return path
 
@@ -146,15 +178,22 @@ def metrics(labels: np.ndarray, scores: np.ndarray) -> dict:
 
 
 @torch.inference_mode()
-def evaluate(model: torch.nn.Module, loader, device: torch.device) -> tuple:
+def evaluate(model: torch.nn.Module, loader, device: torch.device, *, quantize: int = 32, channels_last: bool = False, augment: bool = False) -> tuple:
     model.eval()
     probabilities = np.empty((len(loader.dataset), 10), dtype=np.float32)
     total = 0.0
     for images, targets, indices in loader:
-        output = logits(model, images.to(device))
+        images = images.to(device)
+        if channels_last:
+            images = images.contiguous(memory_format=torch.channels_last)
+        with torch.autocast(device_type=device.type, enabled=quantize == 16):
+            output = logits(model, images).float()
+            probability = output.sigmoid()
+            if augment:
+                probability = (probability + logits(model, images.flip(-1)).float().sigmoid()) / 2
         if not torch.isfinite(output).all():
             raise ValueError("预测出现非有限数值")
         total += torch.nn.functional.binary_cross_entropy_with_logits(
             output, targets.to(device), reduction="sum").item()
-        probabilities[indices.numpy()] = output.sigmoid().cpu().numpy()
+        probabilities[indices.numpy()] = probability.cpu().numpy()
     return probabilities, total / (len(loader.dataset) * 10)

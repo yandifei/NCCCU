@@ -62,6 +62,24 @@ class ResumeTests(unittest.TestCase):
                     torch.testing.assert_close(first["state_dict"][key], second["state_dict"][key], rtol=0, atol=0)
                 for key in ("scheduler", "history", "best", "stale"):
                     self.assertEqual(first["training_state"][key], second["training_state"][key])
+                # 迁移旧版仅有基础参数的检查点，保留原单组优化器和无预热行为。
+                legacy_keys = {
+                    "model", "data", "resume", "epochs", "imgsz", "batch", "workers",
+                    "device", "lr0", "lrf", "weight_decay", "dropout", "patience",
+                    "seed", "amp", "name", "smoke_test",
+                }
+                saved["training_state"]["config"] = {
+                    key: value for key, value in saved["training_state"]["config"].items()
+                    if key in legacy_keys
+                }
+                legacy_path = root / "outputs/legacy.pt"
+                torch.save(saved, legacy_path)
+                migrated = training.train_multilabel(
+                    model=legacy_path, data=data, resume=True, device="cpu", name="migrated",
+                    warmup_epochs=3, warmup_bias_lr=0.1)
+                migrated_state = torch.load(migrated / "weights/last.pt", weights_only=True)
+                for key in first["state_dict"]:
+                    torch.testing.assert_close(first["state_dict"][key], migrated_state["state_dict"][key], rtol=0, atol=0)
                 predicted = predict_multilabel(
                     model=resumed / "weights/best.pt", data=data, device="cpu", name="predicted")
                 with (predicted / "submission.csv").open(encoding="utf-8") as file:
