@@ -101,7 +101,8 @@ def load_model(path: Path, device: torch.device) -> tuple:
     return model.to(device).eval(), checkpoint
 
 
-def device_for(value: str) -> torch.device:
+def device_for(value: str | int) -> torch.device:
+    value = str(value)
     return torch.device(f"cuda:{value}" if value.isdigit() else value)
 
 

@@ -1,0 +1,78 @@
+"""真实模型验证完整训练与中断恢复得到相同权重。"""
+import csv
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import torch
+from PIL import Image
+
+from ncccu import training, multilabel
+from ncccu.inference import predict_multilabel
+
+
+class ResumeTests(unittest.TestCase):
+    def test_interruption_resume_and_prediction(self):
+        weights = multilabel.ROOT / "pretrain_model/yolo26n-cls.pt"
+        if not weights.is_file():
+            self.skipTest("需要本地 yolo26n-cls.pt")
+        original_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        self.addCleanup(torch.set_num_threads, original_threads)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "datasets"
+            data.mkdir()
+            for split in ("train", "valid", "test"):
+                with (data / f"{split}.csv").open("w", encoding="utf-8", newline="") as file:
+                    writer = csv.writer(file)
+                    writer.writerow(["Subject_id", "Study_id", "Dicom_id", "Predict_class"])
+                    for i, label in enumerate(("1;2;3;4;5", "6;7;8;9;10")):
+                        path = data / split / f"subject{i}" / f"study{i}"
+                        path.mkdir(parents=True)
+                        Image.new("RGB", (70, 90), (80+i*40, 90, 120)).save(path / "image.jpg")
+                        writer.writerow([f"subject{i}", f"study{i}", "image", label])
+            config = dict(model=weights, data=data, epochs=2, batch=2, imgsz=64,
+                          dropout=0.2, device="cpu", workers=0, amp=False)
+            with patch.object(multilabel, "ROOT", root):
+                complete = training.train_multilabel(**config, name="complete")
+                evaluate = training.evaluate
+                calls = 0
+
+                def interrupted(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        raise RuntimeError("模拟第二轮中断")
+                    return evaluate(*args, **kwargs)
+
+                with patch.object(training, "evaluate", side_effect=interrupted):
+                    with self.assertRaisesRegex(RuntimeError, "模拟"):
+                        training.train_multilabel(**config, name="interrupted")
+                last = root / "outputs/train/interrupted/weights/last.pt"
+                saved = torch.load(last, weights_only=True)
+                self.assertEqual(saved["epoch"], 1)
+                resumed = training.train_multilabel(
+                    model=last, data=data, resume=True, device="cpu", name="resumed")
+                first = torch.load(complete / "weights/last.pt", weights_only=True)
+                second = torch.load(resumed / "weights/last.pt", weights_only=True)
+                self.assertEqual(second["epoch"], 2)
+                for key in first["state_dict"]:
+                    torch.testing.assert_close(first["state_dict"][key], second["state_dict"][key], rtol=0, atol=0)
+                for key in ("scheduler", "history", "best", "stale"):
+                    self.assertEqual(first["training_state"][key], second["training_state"][key])
+                predicted = predict_multilabel(
+                    model=resumed / "weights/best.pt", data=data, device="cpu", name="predicted")
+                with (predicted / "submission.csv").open(encoding="utf-8") as file:
+                    self.assertEqual(len(list(csv.DictReader(file))), 20)
+                with self.assertRaisesRegex(ValueError, "仅支持推理"):
+                    training.train_multilabel(
+                        model=resumed / "weights/best.pt", data=data, resume=True, device="cpu")
+                with self.assertRaisesRegex(ValueError, "已完成"):
+                    training.train_multilabel(
+                        model=resumed / "weights/last.pt", data=data, resume=True, device="cpu")
+
+
+if __name__ == "__main__":
+    unittest.main()

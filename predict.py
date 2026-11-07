@@ -1,47 +1,16 @@
-"""使用本项目多标签权重，按 Study 输出赛事 CSV。"""
-import argparse
-import csv
-import json
-from pathlib import Path
+from ncccu.inference import predict_multilabel
 
-import torch
-from torch.utils.data import DataLoader
-from ncccu.multilabel import ROOT, ChestDataset, aggregate, device_for, evaluate, load_model, output_dir
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", type=Path, required=True, help="train.py 生成的 best.pt")
-    parser.add_argument("--data", type=Path, default=ROOT / "datasets")
-    parser.add_argument("--split", choices=["train", "valid", "test"], default="test")
-    parser.add_argument("--batch", type=int, default=16)
-    parser.add_argument("--workers", type=int, default=0)
-    parser.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--gate", type=float, default=0.5)
-    parser.add_argument("--name")
-    parser.add_argument("--smoke-test", action="store_true")
-    args = parser.parse_args()
-    if args.batch < 1 or args.workers < 0 or not 0 <= args.gate <= 1:
-        parser.error("batch>=1，workers>=0，gate 在 [0,1] 内")
-    device = device_for(args.device)
-    model, checkpoint = load_model(args.model, device)
-    if checkpoint["smoke_test"] and not args.smoke_test:
-        parser.error("冒烟权重仅可搭配 --smoke-test 验证流程")
-    dataset = ChestDataset(args.data, args.split, checkpoint["imgsz"], args.smoke_test)
-    loader = DataLoader(dataset, batch_size=args.batch, num_workers=args.workers)
-    probabilities, _ = evaluate(model, loader, device)
-    keys, scores, _ = aggregate(dataset, probabilities)
-    run = output_dir("predict", args.name)
-    (run / "args.json").write_text(json.dumps(vars(args), default=str, ensure_ascii=False, indent=2), encoding="utf-8")
-    filename = "smoke_predictions.csv" if args.smoke_test else "submission.csv"
-    with (run / filename).open("w", encoding="utf-8", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow(["Subject_id", "Study_id", "Predict_class", "Probability", "Gate"])
-        for (subject, study), values in zip(keys, scores):
-            for index, probability in enumerate(values, start=1):
-                writer.writerow([subject, study, index, float(probability), args.gate])
-    print(f"预测 {len(dataset)} 张影像 / {len(keys)} 次检查，结果 {run / filename}")
-
-
-if __name__ == "__main__":
-    main()
+# 关键点：保留入口保护，避免 Windows 创建数据加载进程时递归执行
+if __name__ == '__main__':
+    # 将 model 改为你训练生成的 best.pt，直接运行本文件即可预测
+    predict_multilabel(
+        model=r"./outputs/train/你的训练目录/weights/best.pt",  # 本项目训练的多标签权重
+        data=r"./datasets",  # 官方 CSV 和影像所在目录
+        split="test",  # 预测划分，可选 train、valid、test
+        batch=16,  # 推理批次大小，根据显存调整
+        device=0,  # PyTorch 的第一张显卡；使用 CPU 时改为 "cpu"
+        workers=0,  # 数据加载进程数
+        gate=0.5,  # 写入提交表的分类阈值，全部 10 类概率都会输出
+        name=None,  # outputs/predict/ 下的目录名；None 自动使用时间戳
+        smoke_test=False,  # 使用冒烟权重验证流程时改为 True
+    )
