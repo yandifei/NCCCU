@@ -114,7 +114,21 @@
 
 ---
 
-## 七、参考
+## 七、附：本仓库实测数据（2026-11-07 解压后）
+
+| 划分 | CSV 行（=图像数） | 检查数（Study） | 患者数 | 标签 |
+| --- | --- | --- | --- | --- |
+| train | 30 344 | 18 513 | 11 055 | `Predict_class` 分号多标签，如 `1;8;9;4` |
+| valid | 1 422 | 859 | 228 | 同上 |
+| test | 2 218 | 1 414 | 136 | **无标签列** |
+
+- 一个检查平均约 1.64 张图（train），所以「图像数 ≠ 检查数」，提交按检查聚合。
+- 已生成逐图 txt 标签（0-based）：`datasets/labels/`，脚本见 [tools/csv2txt.py](../../tools/csv2txt.py)，用法与统计见 [数据集标签转换说明.md](../数据集标签转换说明.md)。
+- ⚠️ 当前 `datasets/data.yaml` 是 `channels: 5` + `infrared/depth` + 12 类（person/boat/animal…）的另一套检测配置，**与本赛题无关**，不要用于本任务。
+
+---
+
+## 八、参考
 
 - Ultralytics 图像分类任务文档（YOLO26-cls 使用 `-cls` 后缀、ImageNet 预训练、默认 softmax 单标签）：<https://docs.ultralytics.com/tasks/classify/>
 - 本仓库既有资料：[Ultralytics 训练参数参考](../Ultralytics训练参数参考.md)、[Ultralytics 预测参数参考](../Ultralytics预测参数参考.md)
