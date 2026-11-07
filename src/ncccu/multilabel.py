@@ -1,5 +1,6 @@
 """官方 CSV 多标签数据、模型与检查级评估。"""
 import csv
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -74,18 +75,41 @@ class ChestDataset(Dataset):
                                  method=Image.Resampling.BILINEAR, color=(114, 114, 114))
             return np.asarray(image).copy()
 
-    def prepare_cache(self, mode: bool | str, directory: Path) -> None:
+    def prepare_cache(self, mode: bool | str, directory: Path, verbose: bool = True) -> None:
         if mode not in (False, True, "ram", "disk"):
             raise ValueError("cache 必须为 False、True、ram 或 disk")
         self.cache = mode
         self.cache_dir = directory
+        if not mode:
+            if verbose:
+                print(f"[缓存/{self.split}] 已关闭，将在加载批次时读取影像", flush=True)
+            return
         if mode == "disk":
             directory.mkdir(parents=True, exist_ok=False)
-            # 每次运行拥有独立缓存，避免读到旧数据或并发覆盖。
-            for index in range(len(self)):
-                np.save(directory / f"{index}.npy", self.read_image(index))
-        elif mode:
-            self.memory_cache = {index: self.read_image(index) for index in range(len(self))}
+        total = len(self)
+        started = last_report = time.monotonic()
+        if verbose:
+            location = str(directory) if mode == "disk" else "内存"
+            print(f"[缓存/{self.split}] 开始处理 {total} 张影像 → {location}（CPU 读取与缩放）", flush=True)
+        # 每次运行拥有独立缓存，避免读到旧数据或并发覆盖。
+        for index in range(total):
+            image = self.read_image(index)
+            if mode == "disk":
+                np.save(directory / f"{index}.npy", image)
+            else:
+                self.memory_cache[index] = image
+            completed = index + 1
+            now = time.monotonic()
+            if verbose and (completed == 1 or completed == total or now-last_report >= 5):
+                elapsed = max(now-started, 1e-6)
+                rate = completed / elapsed
+                remaining = (total-completed) / rate
+                print(
+                    f"[缓存/{self.split}] {completed}/{total} ({completed/total:.1%}) "
+                    f"| {rate:.1f} 张/秒 | 已用 {elapsed:.0f} 秒 | 预计剩余 {remaining:.0f} 秒",
+                    flush=True,
+                )
+                last_report = now
 
     def __getitem__(self, index: int) -> tuple:
         if self.cache == "disk":

@@ -88,6 +88,8 @@ def train_multilabel(
     args.project = str(args.project) if args.project is not None else None
     args.save_dir = str(args.save_dir) if args.save_dir is not None else None
     device = device_for(device)
+    if args.verbose:
+        print(f"[启动] 模型 {model_path} | device={device} | cache={args.cache}", flush=True)
     configure_randomness(args.seed, args.deterministic)
     checkpoint = None
     if resume:
@@ -133,12 +135,19 @@ def train_multilabel(
     if not args.save and (args.resume or args.save_period > 0):
         raise ValueError("续训和周期保存要求 save=True")
     configure_randomness(args.seed, args.deterministic)
+    if args.verbose:
+        print(f"[数据] 正在读取官方 CSV 并检查影像路径 {args.data}", flush=True)
     train = ChestDataset(Path(args.data), "train", args.imgsz, args.smoke_test)
     valid = ChestDataset(Path(args.data), "valid", args.imgsz, args.smoke_test)
+    if args.verbose:
+        print(f"[数据] 训练 {len(train)} 张，验证 {len(valid)} 张；正在加载模型", flush=True)
     if not resume:
         model = pretrained_model(model_path, args.dropout).to(device)
     if not resume and not args.pretrained:
         model = ClassificationModel(cfg=model.yaml, nc=10, verbose=False).to(device)
+    if args.verbose:
+        device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else str(device)
+        print(f"[模型] 已加载到 {device_name}，数据准备完成后开始训练", flush=True)
     model.model[-1].drop.p = args.dropout
     model.requires_grad_(True)
     if not isinstance(args.freeze, int) or not 0 <= args.freeze < len(model.model):
@@ -171,8 +180,10 @@ def train_multilabel(
         restore_random_state(state["random"])
         print(f"恢复第 {start_epoch} 轮完成后的状态，从第 {start_epoch + 1} 轮继续", flush=True)
     run = output_dir("train", args.name, args.project, args.save_dir)
-    train.prepare_cache(args.cache, run / "cache/train")
-    valid.prepare_cache(args.cache, run / "cache/valid")
+    if args.verbose:
+        print(f"[产出] {run}", flush=True)
+    train.prepare_cache(args.cache, run / "cache/train", verbose=args.verbose)
+    valid.prepare_cache(args.cache, run / "cache/valid", verbose=args.verbose)
     positive_weight = None
     if args.cls_pw:
         positives = torch.stack(train.targets).sum(0)
@@ -188,6 +199,8 @@ def train_multilabel(
         write_history(history, run)
     started = clock.monotonic()
     for epoch in range(start_epoch, args.epochs):
+        if args.verbose:
+            print(f"[训练] 第 {epoch+1}/{args.epochs} 轮，等待首批数据（workers={args.workers}）", flush=True)
         model.train()
         for layer in model.model[:args.freeze]:
             layer.eval()
@@ -226,6 +239,8 @@ def train_multilabel(
         for group in optimizer.param_groups:
             group["lr"] = args.lr0 * (args.lrf + (1-args.lrf)*factor)
         scheduler.step()
+        if args.verbose:
+            print(f"[验证] 第 {epoch+1} 轮，{len(valid)} 张影像", flush=True)
         probabilities, val_loss = evaluate(model, validation, device, channels_last=args.channels_last)
         _, scores, labels = aggregate(valid, probabilities)
         result = metrics(labels, scores)
@@ -258,6 +273,8 @@ def train_multilabel(
             "device_type": device.type,
         }
         if args.save:
+            if args.verbose:
+                print(f"[保存] 第 {epoch+1} 轮权重 → {run / 'weights'}", flush=True)
             atomic_save(checkpoint, run / "weights/last.pt")
             atomic_save(best_checkpoint, run / "weights/best.pt")
             if args.save_period > 0 and (epoch+1) % args.save_period == 0:
