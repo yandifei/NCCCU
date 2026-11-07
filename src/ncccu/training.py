@@ -57,7 +57,7 @@ def write_history(history: list[dict], run: Path) -> None:
 
 
 def train_multilabel(
-    *, model: str | Path = ROOT / "pretrain_model/yolo26n-cls.pt",
+    *, model: str | Path = ROOT / "pretrain_model/yolo26x-cls.pt",
     data: str | Path = ROOT / "datasets", resume: bool = False,
     epochs: int = 100, imgsz: int = 224, batch: int = 16, workers: int = 0,
     device: str | int = 0, lr0: float = 0.001, lrf: float = 0.01,

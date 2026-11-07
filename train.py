@@ -5,7 +5,7 @@ if __name__ == '__main__':
     # 所有参数都实际传入并校验，直接在此修改配置
     train_multilabel(
         # 训练参数
-        model='./pretrain_model/yolo26n-cls.pt',  # 指定用于训练的模型文件
+        model='./pretrain_model/yolo26x-cls.pt',  # 指定用于训练的模型文件
         data='./datasets',  # 官方 CSV 和影像所在目录
         epochs=100,  # 总轮数；续训沿用检查点中的原定值
         time=None,  # 最大训练时间（小时）
