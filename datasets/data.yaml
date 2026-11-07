@@ -1,22 +1,75 @@
-train: train/images
-val: val/images
-infrared:
-  train: train/infrared
-  val: val/infrared
-depth:
-  train: train/depth
-  val: val/depth
-channels: 5
+# =============================================================================
+# NCCCU 人工智能挑战赛 · 胸部 X 光片 10 类多标签分类 —— 数据集配置
+#
+# ⚠️ 这不是 Ultralytics 原生任务的配置，不能直接喂给 `yolo` 训练：
+#    · detect / segment / pose / obb：标签必须是 bbox / 多边形，本赛只有图像级多标签；
+#    · classify：只认 ImageFolder 目录（data=目录，不读 yaml），且一图只能一个类别；
+#    · 当前 Ultralytics 8.4.204 没有多标签分类任务，源码中不存在 multi-label 支持。
+#    本文件的消费者是本项目的自定义多标签 Dataset，不是 Ultralytics。
+#    用法与标签格式见 docs/数据集标签转换说明.md。
+#
+#    路径一律相对本文件所在目录（datasets/）。
+# =============================================================================
+
+task: multi_label_classification
+nc: 10
+
+# 内部索引 0..9，顺序即官方类别 id 1..10 的顺序
 names:
-  0: person
-  1: boat
-  2: animal
-  3: seat
-  4: sign
-  5: bicycle
-  6: car
-  7: ball
-  8: light
-  9: garbage can
-  10: uav
-  11: tricycle
+  0: Enlarged Cardiomediastinum
+  1: Pneumothorax
+  2: Consolidation
+  3: Pneumonia
+  4: Edema
+  5: Cardiomegaly
+  6: Atelectasis
+  7: Lung Opacity
+  8: Pleural Effusion
+  9: No Finding
+
+# 官方 id → 内部索引；CSV 里的 Predict_class 用官方 id（分号分隔，如 1;8;9;4）
+official_id_to_index:
+  1: 0
+  2: 1
+  3: 2
+  4: 3
+  5: 4
+  6: 5
+  7: 6
+  8: 7
+  9: 8
+  10: 9
+
+# 影像根目录：{split}/{Subject_id}/{Study_id}/{Dicom_id}.jpg
+train: train
+val: valid
+test: test
+
+# 派生标签：{labels.root}/{split}/{Subject_id}/{Study_id}/{Dicom_id}.txt
+labels:
+  root: labels
+  format: txt            # 每图一个 txt 文件，内含多个类别索引
+  index_base: 0          # 0-based；转换器加 --id-base 1 时为 1-based
+  separator: " "         # 默认一行空格分隔，如 "2 4 5 8"
+  one_per_line: false    # 转换器加 --one-per-line 时为 true
+
+# 官方标注表
+tables:
+  train: train.csv
+  valid: valid.csv
+  test: test.csv         # 无 Predict_class 列，只能推理
+
+# 2026-11-07 实测规模，用于跑前自检
+dataset_stats:
+  train_images: 30344
+  train_studies: 18513
+  valid_images: 1422
+  valid_studies: 859
+  test_images: 2218
+  test_studies: 1414
+
+# 最终提交按检查（Study）聚合，输出 10 列独立概率
+submit:
+  unit: study
+  num_columns: 10
+  metric: macro_auc

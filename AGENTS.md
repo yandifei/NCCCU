@@ -37,7 +37,7 @@
 
 - 保留官方类别 ID `1–10`，记录内部索引 `0–9` 与官方 ID 的映射。按多标签语义处理标签。
 - 测试集仅用于推理。验证集若按赛事规则并入训练，此后不得再用于选模、早停或调参。
-- `datasets/data.yaml` 当前是 12 类、5 通道的配置，与本赛题不符，使用前须核对。
+- `datasets/data.yaml` 是本赛题的自定义配置（`task: multi_label_classification`、10 类、官方 id 1–10 ↔ 索引 0–9、影像/标签/CSV 路径），供自定义多标签 Dataset 读取；它不是 Ultralytics 原生任务配置，不能直接用于 `yolo detect/classify train`。
 - 原始数据、医学影像、模型权重及生成产物不得提交到 Git。
 
 ## 提交与拉取请求

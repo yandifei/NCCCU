@@ -124,7 +124,7 @@
 
 - 一个检查平均约 1.64 张图（train），所以「图像数 ≠ 检查数」，提交按检查聚合。
 - 已生成逐图 txt 标签（0-based）：`datasets/labels/`，脚本见 [tools/csv2txt.py](../../tools/csv2txt.py)，用法与统计见 [数据集标签转换说明.md](../数据集标签转换说明.md)。
-- ⚠️ 当前 `datasets/data.yaml` 是 `channels: 5` + `infrared/depth` + 12 类（person/boat/animal…）的另一套检测配置，**与本赛题无关**，不要用于本任务。
+- ⚠️ `datasets/data.yaml` 已改写为本赛题的自定义配置（`task: multi_label_classification`、10 类、官方 id 映射、影像/标签/CSV 路径），由自定义多标签 Dataset 读取；它**不是** Ultralytics 原生任务配置，`yolo detect/classify train` 仍然用不了。
 
 ---
 
