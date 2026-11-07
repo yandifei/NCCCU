@@ -16,7 +16,7 @@
 
 项目通过 `uv` 管理依赖，`pyproject.toml` 要求 Python `>=3.15.2`，构建后端为 `uv_build`（`>=0.13.7,<0.14.0`）。`uv.lock` 锁定的直接依赖为 PyTorch `2.15.0`、torchvision `0.29.2` 和 Ultralytics `8.4.204`。
 
-本机开发环境使用 Python `3.15.2` 和 NVIDIA GeForce RTX 5080。GPU 环境使用 PyTorch `2.15.0+cu134`。训练默认使用可用 CUDA 设备，否则使用 CPU；在入口文件中修改 `device` 参数。
+本机开发环境使用 Python `3.15.2` 和 NVIDIA GeForce RTX 5080。GPU 环境使用 PyTorch `2.15.0+cu134`。训练入口显式使用 PyTorch 的 CUDA 设备 0；在入口文件中修改 `device` 参数。
 
 在仓库根目录执行以下命令。
 
@@ -26,7 +26,7 @@
 - `uv run --no-sync python tools/check_dataset.py` 只读检查官方 CSV 和影像路径。
 - `uv run --no-sync python train.py` 启动训练。
 - `uv run --no-sync python predict.py` 对官方测试集推理。
-- train.py 和 predict.py 的参数直接在代码中修改，保留 Windows 入口保护。训练恢复使用 resume=True 和新版 last.pt。
+- train.py 和 predict.py 的参数直接在代码中修改，保留 Windows 入口保护。训练恢复使用 resume=True 和包含训练状态的 last.pt。所有参数实际传入并校验，多标签任务不适用项固定禁用。默认 deterministic=True，缓存、图表、逐图预测与导出同样写入 outputs/。
 - 参数与验证说明见 `docs/训练与推理说明.md`。
 
 ## 代码与验证
