@@ -3,10 +3,10 @@ from ncccu.inference import predict_multilabel
 # 关键点：保留入口保护，避免 Windows 创建进程时递归执行
 if __name__ == '__main__':
     predict_multilabel(
-        model="./outputs/train/ncccu_cls/weights/best.pt",  # 训练得到的最佳权重
+        model="./outputs/train/ncccu_cls_v2_512/weights/best.pt",  # 第二版训练完成后的最佳权重
         split="test",  # 官方 CSV 划分，修改时同步修改 source
         workers=3,  # 数据加载进程数
-        gate=0.5,  # 多标签概率阈值
+        gate=0.5,  # 第二版完成后在 valid 重新校准，第一版的最优阈值不能直接沿用
         deterministic=True,  # 严格确定性算法
         seed=0,  # 固定随机种子
         save_dir=None,  # 默认使用 project/name，也可指定 outputs 内的完整目录
@@ -15,7 +15,7 @@ if __name__ == '__main__':
         source='./datasets/test.csv',  # 显式指定 data/split 对应的官方 CSV
         conf=None,  # 固定约束，设置其他值会报错；设置检测的最低置信度阈值
         iou=None,  # 固定约束，设置其他值会报错；交并比 (IoU) 阈值，用于非极大值抑制 (NMS)
-        imgsz=224,  # 必须与训练检查点的输入尺寸相同
+        imgsz=512,  # 与第二版训练检查点的输入尺寸相同
         rect=False,  # 固定约束，设置其他值会报错；如果为 True，则在可能时使用最小矩形填充（相同形状的批次和受支持的后端）
         quantize=32,  # 32 使用 FP32；16 在 CUDA 上使用 FP16
         device=0,  # 指定推理设备（例如 cpu、cuda:0、0、npu 或 npu:0）
@@ -33,7 +33,7 @@ if __name__ == '__main__':
         retina_masks=False,  # 固定约束，设置其他值会报错；返回高分辨率分割掩码
         embed=None,  # 固定约束，设置其他值会报错；指定用于提取特征向量或嵌入的层
         project='outputs/predict',  # 项目目录的名称；启用 save 后，预测输出将保存到该目录
-        name='ncccu_cls_test',  # 预测运行的名称
+        name='ncccu_cls_v2_512_test',  # 第二版预测目录
         stream=False,  # 固定约束，设置其他值会报错；通过返回 Results 对象生成器，而不是一次性将所有帧加载到内存中，为长视频或大量图像启用节省内存的处理方式
         verbose=True,  # 控制是否在终端中显示详细的推理日志，为预测过程提供实时反馈
         compile=False,  # 固定约束，设置其他值会报错；使用 backend='inductor' 启用 PyTorch 2.x 的 torch.compile 图编译
@@ -72,7 +72,7 @@ if __name__ == '__main__':
         export_options={  # 实际导出，当前支持固定输入的 FP32 TorchScript
             "enabled": True,  # 执行导出
             "format": 'torchscript',  # 当前支持 torchscript
-            "imgsz": 224,  # 匹配训练尺寸
+            "imgsz": 512,  # 匹配第二版训练尺寸
             "batch": 1,  # 导出批量
             "dynamic": False,  # 固定形状
             "quantize": 32,  # 当前支持 FP32
