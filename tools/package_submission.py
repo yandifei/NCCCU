@@ -68,14 +68,15 @@ def entry_script(module: str, function: str, args: dict) -> str:
 def package_submission(
     *, team_name: str, training_run: Path, model: Path, prediction_run: Path,
     submission: Path, pretrain_model: Path, licenses: tuple[Path, ...],
-    cost_script: Path, declaration: Path, output_dir: Path,
+    cost_script: Path, declaration: Path | None, output_dir: Path,
 ) -> Path:
     if not team_name.strip() or any(char in team_name for char in '<>:"/\\|?*'):
         raise ValueError("队伍名不能为空或包含文件名非法字符")
     output_dir = output_dir.resolve()
     if not output_dir.is_relative_to(ROOT / "outputs"):
         raise ValueError("打包目录必须位于仓库 outputs 下")
-    target = output_dir / f"{team_name}_最终提交材料.zip"
+    suffix = "最终提交材料" if declaration is not None else "待核对_缺核验表"
+    target = output_dir / f"{team_name}_{suffix}.zip"
     if target.exists():
         raise FileExistsError(f"目标 ZIP 已存在：{target}")
     train_args_path = training_run / "args.json"
@@ -85,12 +86,13 @@ def package_submission(
         f"model/{model.name}": model,
         f"pretrain_model/{pretrain_model.name}": pretrain_model,
         "cost.py": cost_script,
-        "模型核验材料与数据申明清单.xlsx": declaration,
         "submission.csv": submission,
         "code/pyproject.toml": ROOT / "pyproject.toml",
         "code/uv.lock": ROOT / "uv.lock",
         "code/README.md": ROOT / "README.md",
     }
+    if declaration is not None:
+        files["模型核验材料与数据申明清单.xlsx"] = declaration
     if not licenses or len({path.name for path in licenses}) != len(licenses):
         raise ValueError("须提供许可证全文，文件名不能重复")
     files.update({f"licenses/{path.name}": path for path in licenses})
@@ -101,11 +103,12 @@ def package_submission(
         raise ValueError("缺少以下文件或文件为空：\n" + "\n".join(f"  - {path}" for path in missing))
     if model.stat().st_size > 500_000_000:
         raise ValueError("最终推理权重解压后超过 500 MB")
-    if declaration.suffix.lower() != ".xlsx" or not is_zipfile(declaration):
-        raise ValueError("核验材料须为已填写的官方 XLSX 文件")
-    with ZipFile(declaration) as workbook:
-        if "xl/workbook.xml" not in workbook.namelist():
-            raise ValueError("核验材料缺少 Excel 工作簿内容")
+    if declaration is not None:
+        if declaration.suffix.lower() != ".xlsx" or not is_zipfile(declaration):
+            raise ValueError("核验材料须为已填写的官方 XLSX 文件")
+        with ZipFile(declaration) as workbook:
+            if "xl/workbook.xml" not in workbook.namelist():
+                raise ValueError("核验材料缺少 Excel 工作簿内容")
 
     train_args, predict_args = read_args(train_args_path), read_args(predict_args_path)
     if train_args.get("smoke_test") or train_args.get("resume") or not train_args.get("pretrained"):
@@ -122,7 +125,7 @@ def package_submission(
     train_args.update(model=f"../pretrain_model/{pretrain_model.name}", data="../datasets",
                       project=None, save_dir=None)
     predict_args.update(model=f"../model/{model.name}", data="../datasets", source="../datasets/test.csv",
-                        project=None, save_dir=None, save=False, save_txt=False, show=False,
+                        project=None, name=None, save_dir=None, save=False, save_txt=False, show=False,
                         export_options={"enabled": False})
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     dependencies = {"torch", "torchvision", "ultralytics"}
@@ -132,6 +135,10 @@ def package_submission(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     # 在同一目录先完成 ZIP，再用排他创建保护已有提交包。
+    with pretrain_model.open("rb") as file:
+        pretrain_hash = hashlib.file_digest(file, "sha256").hexdigest()
+    with model.open("rb") as file:
+        model_hash = hashlib.file_digest(file, "sha256").hexdigest()
     with tempfile.TemporaryDirectory(dir=output_dir) as scratch:
         temporary = Path(scratch) / "submission.zip"
         with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=1) as archive:
@@ -140,10 +147,17 @@ def package_submission(
             archive.writestr("code/train.py", entry_script("training", "train_multilabel", train_args))
             archive.writestr("code/predict.py", entry_script("inference", "predict_multilabel", predict_args))
             archive.writestr("code/requirements.txt", requirements)
+            if declaration is None:
+                archive.writestr("待填写核验表.md", (
+                    "此包缺少已填写的官方 XLSX 核验表。\n"
+                    f"\n- 预训练权重：{pretrain_model.name}\n- 预训练 SHA-256：{pretrain_hash}\n"
+                    f"- 推理权重：{model.name}\n- 推理 SHA-256：{model_hash}\n"
+                    f"- 推理精度：FP{predict_args['quantize']}\n"
+                    "- 官方模板及规则：https://www.ncccu.org.cn/index/Paper/case1.html\n"
+                ))
         # os.link 原子发布，目标存在时失败，且临时包和目标位于同一卷。
         target.hardlink_to(temporary)
 
-    with pretrain_model.open("rb") as file:
-        print(f"预训练权重 SHA-256：{hashlib.file_digest(file, 'sha256').hexdigest()}")
+    print(f"预训练权重 SHA-256：{pretrain_hash}")
     print(f"打包完成：{target}")
     return target

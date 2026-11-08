@@ -28,7 +28,7 @@ class PackageSubmissionTests(unittest.TestCase):
                 "fixed_options": {"val": True},
             }))
             write("outputs/predict/run/args.json", json.dumps({
-                "model": str(weights), "split": "test", "imgsz": 512, "gate": 0.3,
+                "model": str(weights), "split": "test", "imgsz": 512, "gate": 0.3, "quantize": 32,
                 "fixed_options": {"task": "classify"},
             }))
             write("datasets/test.csv", "Subject_id,Study_id\nA,001\nA,001\n")
@@ -59,6 +59,11 @@ class PackageSubmissionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "重复"):
                     packaging.package_submission(**args)
                 submission.write_text(header + "".join(rows), encoding="utf-8")
+                draft = packaging.package_submission(**(args | {"declaration": None}))
+                self.assertIn("待核对", draft.name)
+                with ZipFile(draft) as archive:
+                    self.assertIn("待填写核验表.md", archive.namelist())
+                    self.assertNotIn("模型核验材料与数据申明清单.xlsx", archive.namelist())
                 target = packaging.package_submission(**args)
                 with self.assertRaises(FileExistsError):
                     packaging.package_submission(**args)

@@ -1,5 +1,6 @@
 """真实模型验证完整训练与中断恢复得到相同权重。"""
 import csv
+import json
 import io
 from contextlib import redirect_stdout
 import tempfile
@@ -12,6 +13,7 @@ from PIL import Image
 
 from ncccu import training, multilabel
 from ncccu.inference import predict_multilabel
+from cost import benchmark
 
 
 class ResumeTests(unittest.TestCase):
@@ -90,6 +92,18 @@ class ResumeTests(unittest.TestCase):
                     model=resumed / "weights/best.pt", data=data, device="cpu", name="predicted")
                 with (predicted / "submission.csv").open(encoding="utf-8") as file:
                     self.assertEqual(len(list(csv.DictReader(file))), 20)
+                # 抽样只提供一张图，另一视图须从同一检查的正式目录补齐。
+                sample = next((data / "test").rglob("*.jpg"))
+                companion = sample.with_name("companion.jpg")
+                Image.new("RGB", (75, 95), (190, 20, 70)).save(companion)
+                with (data / "test.csv").open("a", encoding="utf-8", newline="") as file:
+                    csv.writer(file).writerow([sample.parent.parent.name, sample.parent.name,
+                                               companion.stem, "1;2;3;4;5"])
+                checked = predict_multilabel(model=resumed / "weights/best.pt", data=data,
+                                             device="cpu", name="checked")
+                benchmark_args = json.loads((checked / "args.json").read_text(encoding="utf-8"))
+                _, mismatches = benchmark(benchmark_args, root, checked / "submission.csv", [sample], [])
+                self.assertEqual(mismatches, 0)
                 with self.assertRaisesRegex(ValueError, "仅支持推理"):
                     training.train_multilabel(
                         model=resumed / "weights/best.pt", data=data, resume=True, device="cpu")

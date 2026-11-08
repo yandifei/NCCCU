@@ -19,6 +19,13 @@ CLASS_NAMES = (
 )
 
 
+def read_chest_image(path: Path, imgsz: int) -> np.ndarray:
+    with Image.open(path) as source:
+        image = ImageOps.pad(source.convert("RGB"), (imgsz, imgsz),
+                             method=Image.Resampling.BILINEAR, color=(114, 114, 114))
+        return np.asarray(image).copy()
+
+
 class ChestDataset(Dataset):
     def __init__(self, root: Path, split: str, imgsz: int, smoke: bool = False):
         self.root, self.split, self.imgsz = root, split, imgsz
@@ -70,10 +77,7 @@ class ChestDataset(Dataset):
         return len(self.rows)
 
     def read_image(self, index: int) -> np.ndarray:
-        with Image.open(self.image_path(self.rows[index])) as source:
-            image = ImageOps.pad(source.convert("RGB"), (self.imgsz, self.imgsz),
-                                 method=Image.Resampling.BILINEAR, color=(114, 114, 114))
-            return np.asarray(image).copy()
+        return read_chest_image(self.image_path(self.rows[index]), self.imgsz)
 
     def prepare_cache(self, mode: bool | str, directory: Path, verbose: bool = True) -> None:
         if mode not in (False, True, "ram", "disk"):
@@ -201,6 +205,21 @@ def metrics(labels: np.ndarray, scores: np.ndarray) -> dict:
             "auc_classes": len(aucs), "macro_f1": float(f1.mean())}
 
 
+def predict_batch(model: torch.nn.Module, images: torch.Tensor, device: torch.device,
+                  *, quantize: int, channels_last: bool, augment: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    images = images.to(device, non_blocking=device.type == "cuda")
+    if channels_last:
+        images = images.contiguous(memory_format=torch.channels_last)
+    with torch.autocast(device_type=device.type, enabled=quantize == 16):
+        output = logits(model, images).float()
+        probability = output.sigmoid()
+        if augment:
+            probability = (probability + logits(model, images.flip(-1)).float().sigmoid()) / 2
+    if not torch.isfinite(output).all() or (augment and not torch.isfinite(probability).all()):
+        raise ValueError("预测出现非有限数值")
+    return output, probability
+
+
 @torch.inference_mode()
 def evaluate(model: torch.nn.Module, loader, device: torch.device, *, quantize: int = 32, channels_last: bool = False, augment: bool = False, verbose: bool = False) -> tuple:
     from ultralytics.utils import TQDM
@@ -210,17 +229,9 @@ def evaluate(model: torch.nn.Module, loader, device: torch.device, *, quantize: 
     total = 0.0
     with TQDM(loader, desc="Validating", total=len(loader), disable=not verbose) as progress:
         for images, targets, indices in progress:
-            images = images.to(device, non_blocking=device.type == "cuda")
             targets = targets.to(device, non_blocking=device.type == "cuda")
-            if channels_last:
-                images = images.contiguous(memory_format=torch.channels_last)
-            with torch.autocast(device_type=device.type, enabled=quantize == 16):
-                output = logits(model, images).float()
-                probability = output.sigmoid()
-                if augment:
-                    probability = (probability + logits(model, images.flip(-1)).float().sigmoid()) / 2
-            if not torch.isfinite(output).all():
-                raise ValueError("预测出现非有限数值")
+            output, probability = predict_batch(model, images, device, quantize=quantize,
+                                                channels_last=channels_last, augment=augment)
             total += torch.nn.functional.binary_cross_entropy_with_logits(
                 output, targets, reduction="sum").item()
             probabilities[indices.numpy()] = probability.cpu().numpy()
