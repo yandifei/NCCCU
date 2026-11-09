@@ -47,9 +47,7 @@ def validate_submission(submission: Path, test_csv: Path) -> None:
 
 
 def read_args(path: Path) -> dict:
-    args = json.loads(path.read_text(encoding="utf-8"))
-    args.update(args.pop("fixed_options", {}))
-    return args
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def entry_script(module: str, function: str, args: dict) -> str:
@@ -111,8 +109,8 @@ def package_submission(
                 raise ValueError("核验材料缺少 Excel 工作簿内容")
 
     train_args, predict_args = read_args(train_args_path), read_args(predict_args_path)
-    if train_args.get("smoke_test") or train_args.get("resume") or not train_args.get("pretrained"):
-        raise ValueError("请选择从公开预训练权重开始的正式训练记录")
+    if train_args.get("smoke_test") or train_args.get("resume") or pretrain_model.suffix != ".safetensors":
+        raise ValueError("请选择从公开 safetensors 权重开始的正式 ConvNeXt 训练记录")
     if (ROOT / train_args["model"]).resolve() != pretrain_model.resolve():
         raise ValueError("所选预训练权重与训练 args.json 不一致")
     if predict_args.get("smoke_test") or predict_args.get("split") != "test":
@@ -122,13 +120,10 @@ def package_submission(
     validate_submission(submission, test_csv)
 
     # 包内入口读取归档中的权重，官方数据由复核方放到解压根目录的 datasets。
-    train_args.update(model=f"../pretrain_model/{pretrain_model.name}", data="../datasets",
-                      project=None, save_dir=None)
-    predict_args.update(model=f"../model/{model.name}", data="../datasets", source="../datasets/test.csv",
-                        project=None, name=None, save_dir=None, save=False, save_txt=False, show=False,
-                        export_options={"enabled": False})
+    train_args.update(model=f"../pretrain_model/{pretrain_model.name}", data="../datasets", name=None)
+    predict_args.update(model=f"../model/{model.name}", data="../datasets", name=None)
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
-    dependencies = {"torch", "torchvision", "ultralytics"}
+    dependencies = {"torch", "torchvision", "timm", "safetensors", "numpy", "pillow", "matplotlib", "tqdm"}
     requirements = "".join(
         f"{item['name']}=={item['version'].split('+')[0]}\n"
         for item in lock["package"] if item["name"] in dependencies

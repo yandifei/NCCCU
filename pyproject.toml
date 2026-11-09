@@ -1,7 +1,7 @@
 [project]
 name = "ncccu"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.3.0"
+description = "NCCCU Study-level ConvNeXt chest X-ray classification"
 readme = "README.md"
 authors = [
     { name = "yandifei", email = "3058439878@qq.com" }
@@ -10,7 +10,12 @@ requires-python = ">=3.15.2"
 dependencies = [
     "torch>=2.15.0",
     "torchvision>=0.29.2",
-    "ultralytics>=8.4.204",
+    "timm>=1.0.26,<2",
+    "safetensors>=0.5",
+    "numpy",
+    "pillow",
+    "matplotlib",
+    "tqdm",
 ]
 
 [project.scripts]

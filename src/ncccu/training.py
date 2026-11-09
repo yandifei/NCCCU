@@ -1,54 +1,28 @@
-"""多标签训练循环与轮次级断点恢复。"""
+"""ConvNeXt 多标签训练、验证及按轮恢复。"""
+
 import csv
 import json
-import random
 import math
-import time as clock
 from pathlib import Path
-from types import SimpleNamespace
 
-import numpy as np
 import torch
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
-from ultralytics.nn.tasks import ClassificationModel
-from ultralytics.utils import TQDM
-from ncccu.runtime import configure_randomness, seed_worker, validate_fixed, plot_history
-from ncccu.train_options import TRAIN_FIXED, training_transform, make_optimizer, set_warmup
+from torchvision.transforms import ColorJitter, Compose, ToTensor
+from tqdm import tqdm
 
-from ncccu.multilabel import (
-    ROOT, CLASS_NAMES, ChestDataset, aggregate, device_for, evaluate,
-    load_model, logits, metrics, output_dir, pretrained_model,
-)
+from ncccu.model import ARCHITECTURE, CHECKPOINT_FORMAT, build_model, read_checkpoint
+from ncccu.multilabel import CLASS_NAMES, ROOT, ChestDataset, aggregate, device_for, evaluate, metrics, output_dir
+from ncccu.runtime import configure_randomness, plot_history, seed_worker
 
 
-def atomic_save(checkpoint: dict, path: Path) -> None:
+def save_checkpoint(path: Path, checkpoint: dict) -> None:
     temporary = path.with_suffix(".tmp")
     torch.save(checkpoint, temporary)
     temporary.replace(path)
 
 
-def random_state() -> dict:
-    numpy_state = np.random.get_state()
-    return {
-        "python": random.getstate(),
-        "numpy": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
-        "torch": torch.get_rng_state(),
-        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
-    }
-
-
-def restore_random_state(state: dict) -> None:
-    random.setstate(state["python"])
-    numpy_state = state["numpy"]
-    np.random.set_state((numpy_state[0], np.array(numpy_state[1], dtype=np.uint32), *numpy_state[2:]))
-    torch.set_rng_state(state["torch"])
-    if torch.cuda.is_available() and state["cuda"]:
-        if len(state["cuda"]) != torch.cuda.device_count():
-            raise ValueError("续训的 CUDA 设备数量与检查点不同")
-        torch.cuda.set_rng_state_all(state["cuda"])
-
-
-def write_history(history: list[dict], run: Path) -> None:
+def write_results(run: Path, history: list[dict]) -> None:
     temporary = run / "results.tmp"
     with temporary.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(history[0]))
@@ -58,258 +32,146 @@ def write_history(history: list[dict], run: Path) -> None:
 
 
 def train_multilabel(
-    *, model: str | Path = ROOT / "pretrain_model/yolo26x-cls.pt",
-    data: str | Path = ROOT / "datasets", resume: bool = False,
-    epochs: int = 100, imgsz: int = 224, batch: int = 16, workers: int = 0,
-    device: str | int = 0, lr0: float = 0.001, lrf: float = 0.01,
-    weight_decay: float = 0.0005, dropout: float = 0.0, patience: int = 20,
-    seed: int = 0, amp: bool = True, name: str | None = None,
-    smoke_test: bool = False,
-    deterministic: bool = True, optimizer: str = "AdamW", momentum: float = 0.9,
-    cos_lr: bool = True, warmup_epochs: float = 0.0,
-    warmup_momentum: float = 0.8, warmup_bias_lr: float = 0.0,
-    save: bool = True, save_period: int = -1, plots: bool = False,
-    cache: bool | str = False, pretrained: bool = True, freeze: int = 0,
-    time: float | None = None, nbs: int | None = None,
-    cls: float = 1.0, cls_pw: float = 0.0, verbose: bool = True,
-    channels_last: bool = False, project: str | Path | None = None,
-    save_dir: str | Path | None = None, fliplr: float = 0.0,
-    flipud: float = 0.0, hsv_h: float = 0.0, hsv_s: float = 0.0,
-    hsv_v: float = 0.0, scale: float = 0.0, erasing: float = 0.0,
-    auto_augment: str | None = None, **fixed_options,
+    *, model: str | Path, data: str | Path = "datasets", name: str | None = None,
+    epochs: int = 40, patience: int = 12, imgsz: int = 512,
+    batch: int = 8, nbs: int = 128, workers: int = 6, device: str | int = 0,
+    lr0: float = 1e-4, lrf: float = 0.01, warmup_epochs: int = 3,
+    weight_decay: float = 5e-4, dropout: float = 0.2, brightness: float = 0.1,
+    amp: bool = True, seed: int = 0, deterministic: bool = True,
+    channels_last: bool = True, smoke_test: bool = False, resume: bool = False,
 ) -> Path:
-    args = SimpleNamespace(**locals())
-    del args.fixed_options
-    validate_fixed(fixed_options, TRAIN_FIXED)
-    args.fixed_options = dict(fixed_options)
-    model_path = (ROOT / model).resolve()
-    args.data = str((ROOT / data).resolve())
-    args.model = str(model_path)
-    args.device = str(device)
-    args.project = str(args.project) if args.project is not None else None
-    args.save_dir = str(args.save_dir) if args.save_dir is not None else None
-    device = device_for(device)
-    if args.verbose:
-        print(f"[启动] 模型 {model_path} | device={device} | cache={args.cache}", flush=True)
-    configure_randomness(args.seed, args.deterministic)
-    checkpoint = None
+    config = dict(locals())
+    weights = (ROOT / model).resolve()
+    checkpoint = read_checkpoint(weights) if resume else None
     if resume:
-        model, checkpoint = load_model(model_path, device)
-        if "training_state" not in checkpoint:
-            raise ValueError("该权重仅支持推理，续训需要新版 last.pt")
-        # 旧版检查点使用单组 AdamW、无预热和增强，恢复时保留其优化器布局。
-        saved_config = checkpoint["training_state"]["config"]
-        if "optimizer" not in saved_config:
-            legacy = dict(
-                optimizer="AdamW", momentum=0.9, cos_lr=True, warmup_epochs=0.0,
-                warmup_momentum=0.8, warmup_bias_lr=0.0, freeze=0, nbs=None,
-                cls=1.0, cls_pw=0.0, fliplr=0.0, flipud=0.0, hsv_h=0.0,
-                hsv_s=0.0, hsv_v=0.0, scale=0.0, erasing=0.0, auto_augment=None,
-                channels_last=False,
-            )
-            for key, value in legacy.items():
-                setattr(args, key, value)
-        # 训练超参数沿用原任务，防止恢复时默认值意外改变学习率和数据处理。
-        for key, value in saved_config.items():
-            if key not in {"model", "data", "device", "workers", "name", "resume", "project", "save_dir"}:
-                setattr(args, key, value)
-        state = checkpoint["training_state"]
-        if checkpoint["epoch"] >= args.epochs or (args.patience and state["stale"] >= args.patience):
-            raise ValueError("该任务已完成总轮数或已触发早停，无待恢复轮次")
-    if args.epochs < 1 or args.batch < 2 or args.imgsz < 64 or args.workers < 0:
-        raise ValueError("epochs>=1，batch>=2，imgsz>=64，workers>=0")
-    if args.lr0 <= 0 or not 0 <= args.lrf <= 1 or args.weight_decay < 0 or not 0 <= args.dropout < 1 or args.patience < 0:
-        raise ValueError("学习率、正则化或 patience 参数无效")
-    validate_fixed(args.fixed_options, TRAIN_FIXED)
-    for key in ("amp", "deterministic", "save", "plots", "pretrained", "cos_lr", "verbose", "channels_last"):
-        if not isinstance(getattr(args, key), bool):
-            raise TypeError(f"{key} 必须为 True 或 False")
-    for key in ("lr0", "lrf", "weight_decay", "dropout", "momentum", "warmup_epochs", "warmup_momentum", "warmup_bias_lr", "cls", "cls_pw"):
-        if not math.isfinite(getattr(args, key)):
-            raise ValueError(f"{key} 必须为有限数值")
-    if not 0 <= args.momentum < 1 or not 0 <= args.warmup_momentum < 1 or args.warmup_epochs < 0 or args.warmup_bias_lr < 0:
-        raise ValueError("动量必须在 [0,1) 内，预热参数不能为负")
-    if args.save_period == 0 or args.save_period < -1 or (args.time is not None and args.time <= 0):
-        raise ValueError("save_period 为 -1 或正整数，time 为 None 或正小时数")
-    if args.cls <= 0 or args.cls_pw < 0 or (args.nbs is not None and args.nbs < 1):
-        raise ValueError("cls>0，cls_pw>=0，nbs 为正整数")
-    if not args.save and (args.resume or args.save_period > 0):
-        raise ValueError("续训和周期保存要求 save=True")
-    configure_randomness(args.seed, args.deterministic)
-    if args.verbose:
-        print(f"[数据] 正在读取官方 CSV 并检查影像路径 {args.data}", flush=True)
-    train = ChestDataset(Path(args.data), "train", args.imgsz, args.smoke_test)
-    valid = ChestDataset(Path(args.data), "valid", args.imgsz, args.smoke_test)
-    if args.verbose:
-        print(f"[数据] 训练 {len(train)} 张，验证 {len(valid)} 张；正在加载模型", flush=True)
-    if not resume:
-        model = pretrained_model(model_path, args.dropout).to(device)
-    if not resume and not args.pretrained:
-        model = ClassificationModel(cfg=model.yaml, nc=10, verbose=False).to(device)
-    if args.verbose:
-        device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else str(device)
-        print(f"[模型] 已加载到 {device_name}，数据准备完成后开始训练", flush=True)
-    model.model[-1].drop.p = args.dropout
-    model.requires_grad_(True)
-    if not isinstance(args.freeze, int) or not 0 <= args.freeze < len(model.model):
-        raise ValueError("freeze 必须为保留至少一层可训练层的非负整数")
-    for layer in model.model[:args.freeze]:
-        layer.requires_grad_(False)
-    if args.channels_last:
-        model.to(memory_format=torch.channels_last)
-    train.transform = training_transform(args)
-    # CUDA 固定内存配合异步传输；保持每轮重新播种，兼容精确断点恢复。
-    loader_options = dict(num_workers=args.workers, worker_init_fn=seed_worker, pin_memory=device.type == "cuda")
-    training = DataLoader(train, batch_size=args.batch, shuffle=True, **loader_options)
-    validation = DataLoader(valid, batch_size=args.batch, **loader_options)
-    optimizer = make_optimizer(model, args)
-    if args.cos_lr:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=args.lr0 * args.lrf)
+        if "training_state" not in checkpoint or weights.name != "last.pt":
+            raise ValueError("续训须选择训练目录中的 weights/last.pt")
+        config = checkpoint["training_state"]["config"].copy()
+        config["device"] = device
     else:
-        scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=max(args.lrf, 1e-12), total_iters=args.epochs)
-    use_amp = args.amp and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    start_epoch, best, stale = 0, float("-inf"), 0
-    history, best_checkpoint = [], None
+        config.update(model=str(weights), data=str((ROOT / data).resolve()))
+
+    batch, nbs, epochs = config["batch"], config["nbs"], config["epochs"]
+    if min(batch, nbs, epochs) < 1 or config["workers"] < 0:
+        raise ValueError("batch、nbs、epochs 须为正整数，workers 须为非负整数")
+    if config["imgsz"] < 32 or config["imgsz"] % 32:
+        raise ValueError("imgsz 须为 32 的正整数倍")
+    if (not 0 <= config["brightness"] <= 1 or not 0 <= config["dropout"] < 1
+            or not 0 < config["lr0"] < math.inf or not 0 < config["lrf"] <= 1
+            or not 0 <= config["weight_decay"] < math.inf or config["patience"] < 0
+            or not 0 <= config["warmup_epochs"] < epochs):
+        raise ValueError("学习率、预热、早停或增强参数超出范围")
+    if not resume and not weights.is_file():
+        raise FileNotFoundError(f"找不到 ImageNet 初始化权重：{weights}")
+
+    target = device_for(config["device"])
+    configure_randomness(config["seed"], config["deterministic"])
+    if resume and checkpoint["training_state"]["device_type"] != target.type:
+        raise ValueError("续训须使用与原训练相同的设备类型")
+    print(f"正在准备 {ARCHITECTURE}，输入 {config['imgsz']}，设备 {target}", flush=True)
+    train = ChestDataset(Path(config["data"]), "train", config["imgsz"], config["smoke_test"])
+    valid = ChestDataset(Path(config["data"]), "valid", config["imgsz"], config["smoke_test"])
+    if config["brightness"]:
+        train.transform = Compose([ColorJitter(brightness=config["brightness"]), ToTensor()])
+    print(f"训练 {len(train)} 张，验证 {len(valid)} 张", flush=True)
+    model = build_model(config["dropout"], None if resume else weights)
     if resume:
+        model.load_state_dict(checkpoint["state_dict"], strict=True)
+    model.to(target)
+    if config["channels_last"]:
+        model.to(memory_format=torch.channels_last)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr0"], weight_decay=config["weight_decay"])
+    amp = config["amp"] and target.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    history = []
+    best, stale = -math.inf, 0
+    if resume:
+        run = weights.parent.parent
+        if not run.is_relative_to((ROOT / "outputs/train").resolve()):
+            raise ValueError("续训检查点须位于 outputs/train 内")
         state = checkpoint["training_state"]
-        if state["device_type"] != device.type:
-            raise ValueError("续训请使用与原任务相同类型的设备，保持 AMP 和优化器状态一致")
         optimizer.load_state_dict(state["optimizer"])
-        scheduler.load_state_dict(state["scheduler"])
         scaler.load_state_dict(state["scaler"])
-        start_epoch, best, stale = checkpoint["epoch"], state["best"], state["stale"]
-        history, best_checkpoint = state["history"], state["best_checkpoint"]
-        restore_random_state(state["random"])
-        print(f"恢复第 {start_epoch} 轮完成后的状态，从第 {start_epoch + 1} 轮继续", flush=True)
-    run = output_dir("train", args.name, args.project, args.save_dir)
-    if args.verbose:
-        print(f"[产出] {run}", flush=True)
-    train.prepare_cache(args.cache, run / "cache/train", verbose=args.verbose)
-    valid.prepare_cache(args.cache, run / "cache/valid", verbose=args.verbose)
-    positive_weight = None
-    if args.cls_pw:
-        positives = torch.stack(train.targets).sum(0)
-        if (positives == 0).any():
-            raise ValueError("类别加权要求训练数据每类至少一个正样本")
-        positive_weight = ((len(train)-positives) / positives).pow(args.cls_pw).to(device)
-    accumulation = max(1, math.ceil((args.nbs or args.batch) / args.batch))
-    (run / "weights").mkdir()
-    (run / "args.json").write_text(json.dumps(vars(args), default=str, ensure_ascii=False, indent=2), encoding="utf-8")
-    if resume:
-        atomic_save(checkpoint, run / "weights/last.pt")
-        atomic_save(best_checkpoint, run / "weights/best.pt")
-        write_history(history, run)
-    started = clock.monotonic()
-    for epoch in range(start_epoch, args.epochs):
-        epoch_started = clock.monotonic()
-        if args.verbose:
-            print(f"[训练] 第 {epoch+1}/{args.epochs} 轮，等待首批数据（workers={args.workers}）", flush=True)
-            print("\n" + "%11s" * 5 % ("Epoch", "GPU_mem", "BCE_loss", "Instances", "Size"), flush=True)
+        history, best, stale = state["history"], state["best"], state["stale"]
+        if len(history) >= epochs or (config["patience"] and stale >= config["patience"]):
+            raise ValueError("训练已经完成或触发早停")
+    else:
+        run = output_dir("train", name)
+        (run / "weights").mkdir()
+        (run / "args.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loader_options = dict(batch_size=batch, num_workers=config["workers"],
+                          pin_memory=target.type == "cuda", worker_init_fn=seed_worker)
+    val_loader = DataLoader(valid, **loader_options)
+    accumulation = math.ceil(nbs / batch)
+    for epoch in range(len(history), epochs):
+        # 每轮由固定种子派生采样、增强和 Dropout 状态，便于从轮次边界恢复。
+        epoch_seed = config["seed"] + epoch
+        configure_randomness(epoch_seed, config["deterministic"])
+        train_loader = DataLoader(train, shuffle=True, generator=torch.Generator().manual_seed(epoch_seed),
+                                  **loader_options)
         model.train()
-        for layer in model.model[:args.freeze]:
-            layer.eval()
-        for group in optimizer.param_groups:
-            if "betas" in group:
-                group["betas"] = (args.momentum, group["betas"][1])
-            else:
-                group["momentum"] = args.momentum
-        total = 0.0
-        with TQDM(enumerate(training), total=len(training), disable=not args.verbose) as progress:
-            for step, (images, targets, _) in progress:
+        loss_sum = 0.0
+        optimizer.zero_grad(set_to_none=True)
+        with tqdm(train_loader, desc=f"Train {epoch + 1}/{epochs}") as progress:
+            for step, (images, labels, _) in enumerate(progress):
                 if step % accumulation == 0:
-                    optimizer.zero_grad(set_to_none=True)
-                set_warmup(optimizer, args, epoch, step, len(training))
-                if args.plots and epoch == start_epoch and step == 0:
-                    from torchvision.utils import save_image
-                    save_image(images[:16], run / "train_batch0.jpg", nrow=4)
-                images = images.to(device, non_blocking=device.type == "cuda")
-                targets = targets.to(device, non_blocking=device.type == "cuda")
-                if args.channels_last:
+                    position = epoch + step / len(train_loader)
+                    warmup = config["warmup_epochs"]
+                    if position < warmup:
+                        factor = max(0.01, position / warmup)
+                    else:
+                        phase = (position - warmup) / (epochs - warmup)
+                        factor = config["lrf"] + (1 - config["lrf"]) * (1 + math.cos(math.pi * phase)) / 2
+                    for group in optimizer.param_groups:
+                        group["lr"] = config["lr0"] * factor
+                images = images.to(target, non_blocking=True)
+                labels = labels.to(target, non_blocking=True)
+                if config["channels_last"]:
                     images = images.contiguous(memory_format=torch.channels_last)
-                with torch.autocast(device_type=device.type, enabled=use_amp):
-                    output = logits(model, images)
-                    loss = args.cls * torch.nn.functional.binary_cross_entropy_with_logits(output, targets, pos_weight=positive_weight)
-                if not torch.isfinite(loss):
-                    raise ValueError("训练损失非有限数值")
-                chunk_start = (step // accumulation) * accumulation * args.batch
-                chunk_samples = min(accumulation * args.batch, len(train)-chunk_start)
-                scaler.scale(loss * len(images) / chunk_samples).backward()
-                if (step+1) % accumulation == 0 or step+1 == len(training):
+                with torch.autocast(device_type=target.type, enabled=amp):
+                    loss = F.binary_cross_entropy_with_logits(model(images), labels)
+                value = loss.detach().item()
+                if not math.isfinite(value):
+                    raise ValueError("训练损失出现非有限数值")
+                group_start = (step // accumulation) * accumulation * batch
+                group_size = min(accumulation * batch, len(train) - group_start)
+                scaler.scale(loss * (len(images) / group_size)).backward()
+                if (step + 1) % accumulation == 0 or step + 1 == len(train_loader):
                     scaler.step(optimizer)
                     scaler.update()
-                total += loss.item() * len(images)
-                if args.verbose:
-                    seen = min((step+1) * args.batch, len(train))
-                    memory = torch.cuda.memory_reserved(device) / 2**30 if device.type == "cuda" else 0.0
-                    progress.set_description(
-                        "%11s%11s%11.5g%11d%11d"
-                        % (f"{epoch+1}/{args.epochs}", f"{memory:.3g}G", total/seen, len(images), args.imgsz)
-                    )
-        if args.verbose:
-            elapsed = clock.monotonic() - epoch_started
-            print(f"[速度] 训练 {len(train)/max(elapsed, 1e-6):.1f} 张/秒，耗时 {elapsed:.1f} 秒（含批次加载）", flush=True)
-        # 预热逐批覆盖 lr；轮次调度始终从该轮的目标学习率推进。
-        factor = ((1+math.cos(math.pi*epoch/args.epochs))/2 if args.cos_lr else 1-epoch/args.epochs)
-        for group in optimizer.param_groups:
-            group["lr"] = args.lr0 * (args.lrf + (1-args.lrf)*factor)
-        scheduler.step()
-        if args.verbose:
-            print(f"[验证] 第 {epoch+1} 轮，{len(valid)} 张影像", flush=True)
-        probabilities, val_loss = evaluate(model, validation, device, channels_last=args.channels_last, verbose=args.verbose)
-        study_keys, scores, labels = aggregate(valid, probabilities)
-        result = metrics(labels, scores)
-        if result["auc_classes"] != 10 and not args.smoke_test:
-            raise ValueError("验证集须包含全部10类的正负样本，无法计算完整 Macro-AUC")
-        row = dict(epoch=epoch+1, train_loss=total/len(train), val_loss=val_loss, **result)
+                    optimizer.zero_grad(set_to_none=True)
+                loss_sum += value * len(images)
+                if step % 20 == 0:
+                    progress.set_postfix(bce=f"{loss_sum / min((step + 1) * batch, len(train)):.4f}",
+                                         lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+
+        probabilities, val_loss = evaluate(model, val_loader, target,
+                                           channels_last=config["channels_last"], verbose=True)
+        _, scores, labels = aggregate(valid, probabilities)
+        row = dict(epoch=epoch + 1, train_loss=loss_sum / len(train), val_loss=val_loss,
+                   **metrics(labels, scores))
+        if row["auc_classes"] != len(CLASS_NAMES) and not config["smoke_test"]:
+            raise ValueError("正式验证集必须包含全部类别的正负样本")
         history.append(row)
-        score = result["macro_auc"] if result["macro_auc"] is not None else -val_loss
+        score = row["macro_auc"] if row["macro_auc"] is not None else -val_loss
         improved = score > best
-        best = max(best, score)
-        stale = 0 if improved else stale + 1
-        if args.verbose:
-            previous = history[-2]["macro_auc"] if len(history) > 1 else None
-            auc = result["macro_auc"]
-            delta = f"{auc-previous:+.5f}" if auc is not None and previous is not None else "--"
-            best_auc = max((item["macro_auc"] for item in history if item["macro_auc"] is not None), default=None)
-            best_text = f"{best_auc:.5f}" if best_auc is not None else "--"
-            auc_text = f"{auc:.5f}" if auc is not None else "--"
-            print("%11s" * 7 % ("Studies", "Val_loss", "Macro-AUC", "Macro-F1", "Best-AUC", "Delta", "Stale"), flush=True)
-            print("%11d%11.5g%11s%11.5g%11s%11s%11d" % (
-                len(study_keys), val_loss, auc_text, result["macro_f1"], best_text, delta, stale), flush=True)
-            if improved:
-                print("[最佳] 本轮验证指标刷新历史最佳" + ("，更新 best.pt" if args.save else ""), flush=True)
-        checkpoint = {
-            "format": "ncccu-multilabel-v1", "classes": list(CLASS_NAMES),
-            "architecture": model.yaml,
-            "state_dict": {key: value.detach().cpu().clone() for key, value in model.state_dict().items()},
-            "imgsz": args.imgsz, "epoch": epoch+1, "metrics": row,
-            "smoke_test": args.smoke_test,
-            "preprocessing": "rgb-pad114-bilinear-div255", "aggregation": "mean",
-        }
+        best, stale = (score, 0) if improved else (best, stale + 1)
+        weights_only = dict(
+            format=CHECKPOINT_FORMAT, architecture=ARCHITECTURE, classes=list(CLASS_NAMES),
+            imgsz=config["imgsz"], epoch=epoch + 1, metrics=row, smoke_test=config["smoke_test"],
+            state_dict={key: value.detach().cpu() for key, value in model.state_dict().items()},
+        )
         if improved:
-            best_checkpoint = dict(checkpoint)
-        # last.pt 内含历史最佳权重和指标，单个文件即可完整恢复。
-        checkpoint["training_state"] = {
-            "config": vars(args), "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(), "scaler": scaler.state_dict(),
-            "best": best, "stale": stale, "history": history,
-            "best_checkpoint": best_checkpoint, "random": random_state(),
-            "device_type": device.type,
-        }
-        if args.save:
-            if args.verbose:
-                print(f"[保存] 第 {epoch+1} 轮权重 → {run / 'weights'}", flush=True)
-            atomic_save(checkpoint, run / "weights/last.pt")
-            atomic_save(best_checkpoint, run / "weights/best.pt")
-            if args.save_period > 0 and (epoch+1) % args.save_period == 0:
-                atomic_save(checkpoint, run / f"weights/epoch{epoch+1}.pt")
-        write_history(history, run)
-        if args.plots:
-            plot_history(history, run)
-        if args.time is not None and clock.monotonic()-started >= args.time*3600:
+            save_checkpoint(run / "weights/best.pt", weights_only)
+        state = dict(config=config, optimizer=optimizer.state_dict(), scaler=scaler.state_dict(),
+                     device_type=target.type, history=history, best=best, stale=stale)
+        save_checkpoint(run / "weights/last.pt", {**weights_only, "training_state": state})
+        write_results(run, history)
+        plot_history(history, run)
+        print(f"Epoch {epoch + 1} | BCE {row['train_loss']:.5f} | Val {val_loss:.5f} | "
+              f"AUC {row['macro_auc']} | Best {best:.5f} | Stale {stale}", flush=True)
+        if config["patience"] and stale >= config["patience"]:
             break
-        if args.patience and stale >= args.patience:
-            break
-    print(f"训练产出 {run}")
+    print(f"训练产出：{run}", flush=True)
     return run

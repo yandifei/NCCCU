@@ -7,7 +7,8 @@ from tools.package_submission import ROOT, package_submission, read_args
 # 一次配置，之后每次预测自动沿用。核验表内容须与当前权重及推理精度对应。
 TEAM_NAME = "队伍名"
 DECLARATION = ROOT / "outputs/合规材料/模型核验材料与数据申明清单.xlsx"
-LICENSES = (ROOT / "LICENSE.txt",)
+LICENSES = (ROOT / "LICENSE.txt", ROOT / "docs/ConvNeXt-Apache-2.0.txt",
+            ROOT / "docs/ConvNeXt-upstream-MIT.txt")
 OUTPUT_DIR = ROOT / "outputs/submission"
 
 

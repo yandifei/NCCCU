@@ -1,6 +1,5 @@
 """官方 CSV 多标签数据、模型与检查级评估。"""
 import csv
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -8,8 +7,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset
-from ultralytics import YOLO
-from ultralytics.nn.tasks import ClassificationModel
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[2]
 CLASS_NAMES = (
@@ -26,12 +24,15 @@ def read_chest_image(path: Path, imgsz: int) -> np.ndarray:
         return np.asarray(image).copy()
 
 
+def normalize_image(tensor: torch.Tensor) -> torch.Tensor:
+    mean = tensor.new_tensor((0.485, 0.456, 0.406))[:, None, None]
+    std = tensor.new_tensor((0.229, 0.224, 0.225))[:, None, None]
+    return (tensor - mean) / std
+
+
 class ChestDataset(Dataset):
     def __init__(self, root: Path, split: str, imgsz: int, smoke: bool = False):
         self.root, self.split, self.imgsz = root, split, imgsz
-        self.cache_dir = None
-        self.memory_cache = {}
-        self.cache = False
         self.transform = None
         with (root / f"{split}.csv").open(encoding="utf-8-sig", newline="") as file:
             reader = csv.DictReader(file)
@@ -76,86 +77,13 @@ class ChestDataset(Dataset):
     def __len__(self) -> int:
         return len(self.rows)
 
-    def read_image(self, index: int) -> np.ndarray:
-        return read_chest_image(self.image_path(self.rows[index]), self.imgsz)
-
-    def prepare_cache(self, mode: bool | str, directory: Path, verbose: bool = True) -> None:
-        if mode not in (False, True, "ram", "disk"):
-            raise ValueError("cache 必须为 False、True、ram 或 disk")
-        self.cache = mode
-        self.cache_dir = directory
-        if not mode:
-            if verbose:
-                print(f"[缓存/{self.split}] 已关闭，将在加载批次时读取影像", flush=True)
-            return
-        if mode == "disk":
-            directory.mkdir(parents=True, exist_ok=False)
-        total = len(self)
-        started = last_report = time.monotonic()
-        if verbose:
-            location = str(directory) if mode == "disk" else "内存"
-            print(f"[缓存/{self.split}] 开始处理 {total} 张影像 → {location}（CPU 读取与缩放）", flush=True)
-        # 每次运行拥有独立缓存，避免读到旧数据或并发覆盖。
-        for index in range(total):
-            image = self.read_image(index)
-            if mode == "disk":
-                np.save(directory / f"{index}.npy", image)
-            else:
-                self.memory_cache[index] = image
-            completed = index + 1
-            now = time.monotonic()
-            if verbose and (completed == 1 or completed == total or now-last_report >= 5):
-                elapsed = max(now-started, 1e-6)
-                rate = completed / elapsed
-                remaining = (total-completed) / rate
-                print(
-                    f"[缓存/{self.split}] {completed}/{total} ({completed/total:.1%}) "
-                    f"| {rate:.1f} 张/秒 | 已用 {elapsed:.0f} 秒 | 预计剩余 {remaining:.0f} 秒",
-                    flush=True,
-                )
-                last_report = now
-
     def __getitem__(self, index: int) -> tuple:
-        if self.cache == "disk":
-            image = np.load(self.cache_dir / f"{index}.npy", allow_pickle=False)
-        elif self.cache:
-            image = self.memory_cache[index].copy()
-        else:
-            image = self.read_image(index)
+        image = read_chest_image(self.image_path(self.rows[index]), self.imgsz)
         if self.transform is not None:
             tensor = self.transform(Image.fromarray(image))
         else:
             tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255
-        return tensor, self.targets[index], index
-
-
-def pretrained_model(path: Path, dropout: float) -> torch.nn.Module:
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    model = YOLO(str(path)).model.float()
-    if not isinstance(model, ClassificationModel):
-        raise ValueError("请选择 -cls 分类预训练模型")
-    head = model.model[-1]
-    head.linear = torch.nn.Linear(head.linear.in_features, 10)
-    head.drop.p = dropout
-    model.yaml["nc"] = 10
-    model.requires_grad_(True)
-    return model
-
-
-def logits(model: torch.nn.Module, images: torch.Tensor) -> torch.Tensor:
-    result = model(images)
-    # Ultralytics eval 返回 (softmax, logits)，多标签链路取原始 logits。
-    return result[1] if isinstance(result, tuple) else result
-
-
-def load_model(path: Path, device: torch.device) -> tuple:
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    if checkpoint.get("format") != "ncccu-multilabel-v1" or checkpoint["classes"] != list(CLASS_NAMES):
-        raise ValueError("需要本项目 train.py 生成的多标签权重")
-    model = ClassificationModel(cfg=checkpoint["architecture"], nc=10, verbose=False)
-    model.load_state_dict(checkpoint["state_dict"])
-    return model.to(device).eval(), checkpoint
+        return normalize_image(tensor), self.targets[index], index
 
 
 def device_for(value: str | int) -> torch.device:
@@ -163,12 +91,11 @@ def device_for(value: str | int) -> torch.device:
     return torch.device(f"cuda:{value}" if value.isdigit() else value)
 
 
-def output_dir(kind: str, name: str | None, project: str | Path | None = None, save_dir: str | Path | None = None) -> Path:
+def output_dir(kind: str, name: str | None) -> Path:
     name = name or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     if not name or Path(name).name != name or name in {".", ".."} or any(c in name for c in "/\\:"):
         raise ValueError("name 必须是单层目录名")
-    project = ROOT / project if project is not None else ROOT / "outputs" / kind
-    path = (ROOT / save_dir if save_dir is not None else project / name).resolve()
+    path = (ROOT / "outputs" / kind / name).resolve()
     if not path.is_relative_to((ROOT / "outputs").resolve()):
         raise ValueError("全部产出必须位于 outputs 目录内")
     path.mkdir(parents=True, exist_ok=False)
@@ -211,10 +138,10 @@ def predict_batch(model: torch.nn.Module, images: torch.Tensor, device: torch.de
     if channels_last:
         images = images.contiguous(memory_format=torch.channels_last)
     with torch.autocast(device_type=device.type, enabled=quantize == 16):
-        output = logits(model, images).float()
+        output = model(images).float()
         probability = output.sigmoid()
         if augment:
-            probability = (probability + logits(model, images.flip(-1)).float().sigmoid()) / 2
+            probability = (probability + model(images.flip(-1)).float().sigmoid()) / 2
     if not torch.isfinite(output).all() or (augment and not torch.isfinite(probability).all()):
         raise ValueError("预测出现非有限数值")
     return output, probability
@@ -222,12 +149,10 @@ def predict_batch(model: torch.nn.Module, images: torch.Tensor, device: torch.de
 
 @torch.inference_mode()
 def evaluate(model: torch.nn.Module, loader, device: torch.device, *, quantize: int = 32, channels_last: bool = False, augment: bool = False, verbose: bool = False) -> tuple:
-    from ultralytics.utils import TQDM
-
     model.eval()
     probabilities = np.empty((len(loader.dataset), 10), dtype=np.float32)
     total = 0.0
-    with TQDM(loader, desc="Validating", total=len(loader), disable=not verbose) as progress:
+    with tqdm(loader, desc="Validating", total=len(loader), disable=not verbose) as progress:
         for images, targets, indices in progress:
             targets = targets.to(device, non_blocking=device.type == "cuda")
             output, probability = predict_batch(model, images, device, quantize=quantize,

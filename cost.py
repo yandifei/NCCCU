@@ -2,7 +2,6 @@
 
 import argparse
 import csv
-import json
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -27,7 +26,8 @@ def benchmark(config: dict, root: Path, submission: Path, samples: list[Path],
     import numpy as np
     import torch
 
-    from ncccu.multilabel import device_for, load_model, predict_batch, read_chest_image
+    from ncccu.model import load_model
+    from ncccu.multilabel import device_for, normalize_image, predict_batch, read_chest_image
     from ncccu.runtime import configure_randomness
 
     data = root / "datasets"
@@ -70,7 +70,7 @@ def benchmark(config: dict, root: Path, submission: Path, samples: list[Path],
         scores = []
         for path in paths:
             array = read_chest_image(path, checkpoint["imgsz"])
-            images = (torch.from_numpy(array).permute(2, 0, 1).float() / 255).unsqueeze(0)
+            images = normalize_image(torch.from_numpy(array).permute(2, 0, 1).float() / 255).unsqueeze(0)
             _, probability = predict_batch(model, images, device, quantize=config["quantize"],
                                            channels_last=config["channels_last"], augment=config["augment"])
             scores.append(probability.cpu().numpy()[0])

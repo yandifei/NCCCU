@@ -27,14 +27,6 @@ def seed_worker(worker_id: int) -> None:
     np.random.seed(seed)
 
 
-def validate_fixed(options: dict, fixed: dict) -> None:
-    for key, value in options.items():
-        if key not in fixed:
-            raise TypeError(f"未知参数 {key}")
-        if value != fixed[key]:
-            raise ValueError(f"当前多标签流程要求 {key}={fixed[key]!r}，收到 {value!r}")
-
-
 def plot_history(history: list[dict], run: Path) -> None:
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg

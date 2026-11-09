@@ -22,14 +22,12 @@ class PackageSubmissionTests(unittest.TestCase):
                 return path
 
             weights = write("outputs/train/run/weights/best.pt", "test weight")
-            pretrain = write("pretrain_model/base.pt", "test pretrained weight")
+            pretrain = write("pretrain_model/base.safetensors", "test pretrained weight")
             write("outputs/train/run/args.json", json.dumps({
-                "model": str(pretrain), "pretrained": True, "imgsz": 512,
-                "fixed_options": {"val": True},
+                "model": str(pretrain), "imgsz": 512,
             }))
             write("outputs/predict/run/args.json", json.dumps({
                 "model": str(weights), "split": "test", "imgsz": 512, "gate": 0.3, "quantize": 32,
-                "fixed_options": {"task": "classify"},
             }))
             write("datasets/test.csv", "Subject_id,Study_id\nA,001\nA,001\n")
             write("datasets/private.jpg", "test image")
@@ -72,7 +70,7 @@ class PackageSubmissionTests(unittest.TestCase):
                 self.assertEqual(set(archive.namelist()), {
                     "code/train.py", "code/predict.py", "code/requirements.txt", "code/uv.lock",
                     "code/pyproject.toml", "code/README.md", "code/src/ncccu/inference.py",
-                    "model/best.pt", "pretrain_model/base.pt", "licenses/LICENSE.txt",
+                    "model/best.pt", "pretrain_model/base.safetensors", "licenses/LICENSE.txt",
                     "cost.py", "模型核验材料与数据申明清单.xlsx", "submission.csv",
                 })
                 for name in ("code/train.py", "code/predict.py"):

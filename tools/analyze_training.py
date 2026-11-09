@@ -8,11 +8,12 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
-from ultralytics.utils import TQDM
+from tqdm import tqdm
 
 from ncccu.multilabel import (
-    ROOT, CLASS_NAMES, ChestDataset, aggregate, device_for, evaluate, load_model, metrics, output_dir,
+    ROOT, CLASS_NAMES, ChestDataset, aggregate, device_for, evaluate, metrics, output_dir,
 )
+from ncccu.model import load_model
 from ncccu.runtime import configure_randomness, seed_worker
 from ncccu.thresholds import f1_scores, optimize_thresholds, patient_folds
 
@@ -24,7 +25,7 @@ def file_hash(path: Path) -> str:
 
 def size_statistics(dataset: ChestDataset) -> dict:
     sizes = []
-    for row in TQDM(dataset.rows, desc=f'{dataset.split} image sizes'):
+    for row in tqdm(dataset.rows, desc=f'{dataset.split} image sizes'):
         with Image.open(dataset.image_path(row)) as source:
             sizes.append(source.size)
     sizes = np.asarray(sizes)
@@ -170,9 +171,9 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
 # 直接修改配置；仅使用 train/valid，测试集不参与阈值拟合。
 if __name__ == '__main__':
     analyze_training(
-        training_run='./outputs/train/ncccu_cls',
+        training_run='./outputs/train/v3_convnext_small_512',
         data='./datasets',
-        name='ncccu_cls_thresholds',  # 再次分析时改为未使用的目录名
+        name='v3_convnext_small_512_thresholds',  # 再次分析时改为未使用的目录名
         device=0,
         batch=16,  # 与 predict.py 的 FP32 推理批量一致
         workers=3,

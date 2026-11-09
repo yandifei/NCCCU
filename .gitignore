@@ -248,6 +248,7 @@ outputs/
 
 # ---- 机器学习模型权重与检查点（单个文件可能超过 100MB，必须忽略） ----
 *.ckpt
+*.safetensors
 *.pt
 *.pth
 *.h5
