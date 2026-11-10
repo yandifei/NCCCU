@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 
 from cost import benchmark
-from ncccu import inference, model, multilabel, training
+from ncccu import inference, model, runtime, training
 
 
 def tiny_model(dropout: float, pretrained: Path | None = None) -> torch.nn.Module:
@@ -40,7 +40,7 @@ class ResumeTest(unittest.TestCase):
             pretrained.touch()
             args = dict(model=pretrained, data=data, epochs=2, patience=0, imgsz=32,
                         batch=2, nbs=4, workers=0, device="cpu", warmup_epochs=1)
-            with (patch.object(multilabel, "ROOT", root), patch.object(training, "ROOT", root),
+            with (patch.object(runtime, "ROOT", root), patch.object(training, "ROOT", root),
                   patch.object(inference, "ROOT", root), patch.object(training, "build_model", tiny_model),
                   patch.object(model, "build_model", tiny_model)):
                 complete = training.train_multilabel(**args, name="complete")
