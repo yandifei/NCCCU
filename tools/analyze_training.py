@@ -171,10 +171,10 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
 # 直接修改配置；仅使用 train/valid，测试集不参与阈值拟合。
 if __name__ == '__main__':
     analyze_training(
-        training_run='./outputs/train/v3_convnext_small_512',
+        training_run='./outputs/train/v4_fp32_lr3e5_512',
         data='./datasets',
-        name='v3_convnext_small_512_thresholds',  # 再次分析时改为未使用的目录名
+        name='v4_fp32_lr3e5_512_thresholds',  # 再次分析时改为未使用的目录名
         device=0,
-        batch=16,  # 与 predict.py 的 FP32 推理批量一致
+        batch=1,  # 与 predict.py 的 FP32 推理批量一致
         workers=3,
     )

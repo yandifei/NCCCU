@@ -278,6 +278,18 @@ def train_multilabel(
     if checkpoint is not None and checkpoint["training_state"]["device_type"] != target.type:
         raise ValueError("续训须使用与原训练相同的设备类型")
     print(f"正在准备 {ARCHITECTURE}，输入 {config.imgsz}，设备 {target}", flush=True)
+    precision = "AMP FP16" if config.amp and target.type == "cuda" else "FP32"
+    print(
+        f"训练配置 name={config.name} | 精度={precision} | amp={config.amp} | "
+        f"batch={config.batch} | nbs={config.nbs} | resume={checkpoint is not None}",
+        flush=True,
+    )
+    print(
+        f"学习率 lr0={config.lr0:.2e} | lrf={config.lrf} | "
+        f"epochs={config.epochs} | warmup_epochs={config.warmup_epochs} | "
+        f"patience={config.patience}",
+        flush=True,
+    )
     train, valid = _prepare_datasets(config)
     print(f"训练 {len(train)} 张，验证 {len(valid)} 张", flush=True)
 
@@ -290,6 +302,13 @@ def train_multilabel(
     optimizer = torch.optim.AdamW(network.parameters(), lr=config.lr0, weight_decay=config.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=config.amp and target.type == "cuda")
     progress = _initialize_run(config, weights, checkpoint, optimizer, scaler)
+    print(
+        f"产出目录 {progress.path} | 模型类型={next(network.parameters()).dtype} | "
+        f"GradScaler={scaler.is_enabled()} | "
+        f"TF32(matmul/cuDNN)={torch.backends.cuda.matmul.allow_tf32}/"
+        f"{torch.backends.cudnn.allow_tf32}",
+        flush=True,
+    )
     val_loader = DataLoader(
         valid,
         batch_size=config.batch,

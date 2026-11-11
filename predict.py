@@ -7,7 +7,7 @@ from push import package_prediction
 # Windows 工作进程需要入口保护，避免重复加载模型和启动推理。
 if __name__ == "__main__":
     prediction_run = predict_multilabel(
-        model="./outputs/train/v3_convnext_small_512/weights/best.pt",  # 选择本次推理权重。
+        model="./outputs/train/v4_fp32_lr3e5_512/weights/best.pt",  # 第四版按验证 AUC 选出的权重。
         data="./datasets",  # 官方 CSV 和影像的根目录。
         split="test",  # test 自动打包，valid 仅输出验证集预测。
         device=0,  # PyTorch 中的 CUDA 设备编号。
