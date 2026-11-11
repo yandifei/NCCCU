@@ -53,6 +53,7 @@ class TrainingConfig:
     channels_last: bool = True
     smoke_test: bool = False
     resume: bool = False
+    objective: str = "image"
 
     def validate(self) -> None:
         """检查训练参数范围，不访问数据集或加载模型。"""
@@ -73,6 +74,10 @@ class TrainingConfig:
         )
         if min(self.batch, self.nbs, self.epochs) < 1 or self.workers < 0:
             raise ValueError("batch、nbs、epochs 须为正整数，workers 须为非负整数")
+        if not isinstance(self.objective, str) or self.objective not in {
+            "image", "study_weighted", "study_mean"
+        }:
+            raise ValueError("objective 须为 image、study_weighted 或 study_mean")
         if self.imgsz < 32 or self.imgsz % 32:
             raise ValueError("imgsz 须为 32 的正整数倍")
         if not 0 <= self.seed < 2**32 or self.seed + self.epochs - 1 >= 2**32:

@@ -1,21 +1,22 @@
-"""ConvNeXt 多标签训练：组织单轮优化、Study 验证和轮次边界恢复。"""
+"""按影像或完整 Study 优化十类模型，以检查级 Macro-AUC 选模。"""
 
 import csv
 import json
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import numpy as np
 import torch
-from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision.transforms import ColorJitter, Compose, ToTensor
 from tqdm import tqdm
 
 from ncccu.configuration import TrainingConfig
-from ncccu.data import CLASS_NAMES, ChestDataset
-from ncccu.evaluation import aggregate, evaluate, metrics
+from ncccu.data import CLASS_NAMES, ChestDataset, StudyDataset, collate_studies
+from ncccu.evaluation import aggregate, evaluate, save_study_probabilities, study_report
+from ncccu.objectives import image_bce, study_mean_bce
 from ncccu.model import (
     ARCHITECTURE,
     CHECKPOINT_FORMAT,
@@ -56,7 +57,9 @@ def write_results(run: Path, history: list[HistoryRow]) -> None:
     """按历史字段顺序原子更新结果 CSV。"""
     temporary = run / "results.tmp"
     with temporary.open("w", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=list(history[0]))
+        # 旧检查点历史缺少新增指标，保留空值，不伪造历史验证结果。
+        fields = list(dict.fromkeys(key for row in history for key in row))
+        writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
         writer.writerows(history)
     temporary.replace(run / "results.csv")
@@ -137,18 +140,21 @@ def _train_epoch(
     config: TrainingConfig,
     epoch: int,
 ) -> float:
-    """完成一轮逐图 BCE 优化，返回按样本数加权的平均损失。"""
+    """遍历全部训练样本，按目标规定的单位累积梯度和平均损失。"""
     # 每轮重新派生采样、增强及 Dropout 状态，恢复不依赖中断前的 RNG 快照。
     epoch_seed = config.seed + epoch
     configure_randomness(epoch_seed, config.deterministic)
+    study_training = config.objective == "study_mean"
+    samples = StudyDataset(dataset) if study_training else dataset
     loader = DataLoader(
-        dataset,
+        samples,
         batch_size=config.batch,
         num_workers=config.workers,
         pin_memory=target.type == "cuda",
         worker_init_fn=seed_worker,
         shuffle=True,
         generator=torch.Generator().manual_seed(epoch_seed),
+        collate_fn=collate_studies if study_training else None,
     )
     accumulation = math.ceil(config.nbs / config.batch)
     amp = config.amp and target.type == "cuda"
@@ -156,36 +162,63 @@ def _train_epoch(
     loss_sum = 0.0
     optimizer.zero_grad(set_to_none=True)
     with tqdm(loader, desc=f"Train {epoch + 1}/{config.epochs}") as progress:
-        for step, (images, labels, _) in enumerate(progress):
+        for step, batch in enumerate(progress):
             if step % accumulation == 0:
                 learning_rate = _learning_rate(config, epoch + step / len(loader))
                 for group in optimizer.param_groups:
                     group["lr"] = learning_rate
-            images = images.to(target, non_blocking=True)
-            labels = labels.to(target, non_blocking=True)
-            if config.channels_last:
-                images = images.contiguous(memory_format=torch.channels_last)
-            with torch.autocast(device_type=target.type, enabled=amp):
-                loss = F.binary_cross_entropy_with_logits(network(images), labels)
-            value = loss.detach().item()
-            if not math.isfinite(value):
-                raise ValueError("训练损失出现非有限数值")
-
-            # 尾组可能不足 nbs，按实际样本数归一化，避免少量样本的梯度被缩小。
+            # 两种采样单位均按尾组实际数量归一化，避免尾组更新幅度偏小。
             group_start = (step // accumulation) * accumulation * config.batch
-            group_size = min(accumulation * config.batch, len(dataset) - group_start)
-            scaler.scale(loss * (len(images) / group_size)).backward()
+            group_size = min(accumulation * config.batch, len(samples) - group_start)
+            if study_training:
+                # 每次仅保留一个 Study 的计算图；全部视图参与，不截断多视图检查。
+                for images, labels, _ in batch:
+                    images, labels = _move_batch(images, labels, target, config.channels_last)
+                    with torch.autocast(device_type=target.type, enabled=amp):
+                        loss = study_mean_bce(network(images), labels)
+                    loss_sum += _backward_loss(loss, 1 / group_size, scaler)
+            else:
+                images, labels, indices = batch
+                images, labels = _move_batch(images, labels, target, config.channels_last)
+                weights = None
+                if config.objective == "study_weighted":
+                    weights = dataset.image_weights[indices].to(target, non_blocking=True)
+                with torch.autocast(device_type=target.type, enabled=amp):
+                    loss = image_bce(network(images), labels, weights)
+                value = _backward_loss(loss, len(images) / group_size, scaler)
+                loss_sum += value * len(images)
             if (step + 1) % accumulation == 0 or step + 1 == len(loader):
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-            loss_sum += value * len(images)
             if step % 20 == 0:
                 progress.set_postfix(
-                    bce=f"{loss_sum / min((step + 1) * config.batch, len(dataset)):.4f}",
+                    bce=f"{loss_sum / min((step + 1) * config.batch, len(samples)):.4f}",
                     lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                 )
-    return loss_sum / len(dataset)
+    return loss_sum / len(samples)
+
+
+def _move_batch(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    target: torch.device,
+    channels_last: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """统一影像和 Study 前向使用的精度、设备与内存布局。"""
+    images = images.to(target, non_blocking=True)
+    if channels_last:
+        images = images.contiguous(memory_format=torch.channels_last)
+    return images, labels.to(target, non_blocking=True)
+
+
+def _backward_loss(loss: torch.Tensor, factor: float, scaler: torch.amp.GradScaler) -> float:
+    """检查损失后按实际累积组大小反向传播，返回未缩放的日志数值。"""
+    value = loss.detach().item()
+    if not math.isfinite(value):
+        raise ValueError("训练损失出现非有限数值")
+    scaler.scale(loss * factor).backward()
+    return value
 
 
 def _validate_epoch(
@@ -196,21 +229,25 @@ def _validate_epoch(
     config: TrainingConfig,
     epoch: int,
     train_loss: float,
-) -> HistoryRow:
+) -> tuple[HistoryRow, dict[str, Any], np.ndarray]:
     """以 FP32 验证逐图损失，并用 Study 平均概率计算选模指标。"""
     probabilities, val_loss = evaluate(
         network, loader, target, channels_last=config.channels_last, verbose=True
     )
-    _, scores, labels = aggregate(dataset, probabilities)
+    _, scores, _ = aggregate(dataset, probabilities)
+    report = study_report(dataset, scores)
     row: HistoryRow = dict(
         epoch=epoch + 1,
         train_loss=train_loss,
         val_loss=val_loss,
-        **metrics(labels, scores),
+        study_val_loss=report["study_val_loss"],
+        macro_auc=report["macro_auc"],
+        auc_classes=report["auc_classes"],
+        macro_f1=report["macro_f1"],
     )
     if row["auc_classes"] != len(CLASS_NAMES) and not config.smoke_test:
         raise ValueError("正式验证集必须包含全部类别的正负样本")
-    return row
+    return row, report, scores
 
 
 def _record_epoch(
@@ -221,6 +258,9 @@ def _record_epoch(
     config: TrainingConfig,
     progress: _TrainingRun,
     row: HistoryRow,
+    report: dict[str, Any],
+    dataset: ChestDataset,
+    scores: np.ndarray,
 ) -> None:
     """更新选模进度，按原顺序保存最佳权重、恢复权重和训练记录。"""
     progress.history.append(row)
@@ -240,6 +280,8 @@ def _record_epoch(
     )
     if improved:
         save_checkpoint(progress.path / "weights/best.pt", weights_only)
+        save_study_probabilities(progress.path / "best_validation.npz", dataset, scores)
+        _write_report(progress.path / "best_validation.json", {"epoch": row["epoch"], **report})
     state: TrainingState = dict(
         config=config.to_dict(),
         optimizer=optimizer.state_dict(),
@@ -251,7 +293,15 @@ def _record_epoch(
     )
     save_checkpoint(progress.path / "weights/last.pt", {**weights_only, "training_state": state})
     write_results(progress.path, progress.history)
+    _write_report(progress.path / "last_validation.json", {"epoch": row["epoch"], **report})
     plot_history(progress.history, progress.path)
+
+
+def _write_report(path: Path, report: dict[str, Any]) -> None:
+    """原子保存检查级诊断，便于逐类和单视图、多视图对比。"""
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    temporary.replace(path)
 
 
 def train_multilabel(
@@ -262,6 +312,7 @@ def train_multilabel(
     weight_decay: float = 5e-4, dropout: float = 0.2, brightness: float = 0.1,
     amp: bool = True, seed: int = 0, deterministic: bool = True,
     channels_last: bool = True, smoke_test: bool = False, resume: bool = False,
+    objective: str = "image",
 ) -> Path:
     """从官方 CSV 训练十类模型，或从 last.pt 的下一轮恢复。"""
     config = TrainingConfig(
@@ -270,7 +321,7 @@ def train_multilabel(
         lr0=lr0, lrf=lrf, warmup_epochs=warmup_epochs, weight_decay=weight_decay,
         dropout=dropout, brightness=brightness, amp=amp, seed=seed,
         deterministic=deterministic, channels_last=channels_last,
-        smoke_test=smoke_test, resume=resume,
+        smoke_test=smoke_test, resume=resume, objective=objective,
     )
     config, weights, checkpoint = _resolve_configuration(config)
     target = device_for(config.device)
@@ -281,7 +332,8 @@ def train_multilabel(
     precision = "AMP FP16" if config.amp and target.type == "cuda" else "FP32"
     print(
         f"训练配置 name={config.name} | 精度={precision} | amp={config.amp} | "
-        f"batch={config.batch} | nbs={config.nbs} | resume={checkpoint is not None}",
+        f"objective={config.objective} | batch={config.batch} | nbs={config.nbs} | "
+        f"resume={checkpoint is not None}",
         flush=True,
     )
     print(
@@ -291,7 +343,12 @@ def train_multilabel(
         flush=True,
     )
     train, valid = _prepare_datasets(config)
-    print(f"训练 {len(train)} 张，验证 {len(valid)} 张", flush=True)
+    unit = "Study" if config.objective == "study_mean" else "影像"
+    print(
+        f"训练 {len(train)} 张 / {len(train.study_keys)} 次检查，"
+        f"验证 {len(valid)} 张 / {len(valid.study_keys)} 次检查 | batch/nbs 单位={unit}",
+        flush=True,
+    )
 
     network = build_model(config.dropout, None if checkpoint is not None else weights)
     if checkpoint is not None:
@@ -318,10 +375,11 @@ def train_multilabel(
     )
     for epoch in range(len(progress.history), config.epochs):
         train_loss = _train_epoch(network, train, optimizer, scaler, target, config, epoch)
-        row = _validate_epoch(network, val_loader, valid, target, config, epoch, train_loss)
-        _record_epoch(network, optimizer, scaler, target, config, progress, row)
+        row, report, scores = _validate_epoch(network, val_loader, valid, target, config, epoch, train_loss)
+        _record_epoch(network, optimizer, scaler, target, config, progress, row, report, valid, scores)
         print(
-            f"Epoch {epoch + 1} | BCE {row['train_loss']:.5f} | Val {row['val_loss']:.5f} | "
+            f"Epoch {epoch + 1} | Train BCE {row['train_loss']:.5f} | "
+            f"Image Val {row['val_loss']:.5f} | Study Val {row['study_val_loss']:.5f} | "
             f"AUC {row['macro_auc']} | Best {progress.best:.5f} | Stale {progress.stale}",
             flush=True,
         )

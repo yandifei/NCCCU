@@ -1,4 +1,4 @@
-"""第四版训练入口，使用 FP32 和较低学习率微调 ConvNeXt-Small。"""
+"""第五版训练入口，直接修改参数以比较 Study 等权和多视图聚合训练。"""
 
 from ncccu.training import train_multilabel
 
@@ -8,12 +8,13 @@ if __name__ == "__main__":
     train_multilabel(
         model="./pretrain_model/convnext_small.fb_in22k_ft_in1k.safetensors",  # ImageNet 初始化权重。
         data="./datasets",  # 包含官方 CSV 和影像的数据目录。
-        name="v4_fp32_lr3e5_512",  # 输出至 outputs/train 下的独立运行目录。
-        imgsz=512,  # 保持宽高比缩放并填充后的输入边长。
+        name="v5_study_mean_512",  # 每组对照使用独立名称，产出位于 outputs/train。
+        objective="study_mean",  # study_weighted 为检查等权；study_mean 为聚合概率后计算 BCE；image 为逐图基线。
+        imgsz=512,  # 全图等比例缩放并填充；分辨率对照时改为 640 并修改 name。
         epochs=16,  # 训练上限，同时决定余弦学习率的衰减周期。
         patience=6,  # 验证 Macro-AUC 连续 6 轮无提升时早停。
-        batch=8,  # 每 16 个微批累积一次，名义更新批量为 128。
-        nbs=128,  # 名义更新批量；实际每组累积 ceil(nbs / batch) 个微批。
+        batch=8,  # image/study_weighted 按图计数，study_mean 按检查计数并逐检查反传。
+        nbs=128,  # 累积目标数量，单位与 batch 一致；尾组按实际数量归一化。
         workers=6,  # 数据加载工作进程数量。
         device=0,  # CUDA 设备索引；CPU 验证时可改为 "cpu"。
         lr0=0.00003,  # 降低微调学习率，减小预训练参数的每步更新幅度。

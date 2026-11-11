@@ -1,4 +1,4 @@
-"""读取固定检查点，生成按 Study 聚合的赛事预测结果。"""
+"""按检查生成十类概率、验证诊断和可追溯的赛事预测产物。"""
 
 import json
 from dataclasses import replace
@@ -9,9 +9,9 @@ from torch.utils.data import DataLoader
 
 from ncccu.configuration import PredictionConfig
 from ncccu.data import ChestDataset
-from ncccu.evaluation import aggregate, evaluate
+from ncccu.evaluation import aggregate, evaluate, save_study_probabilities, study_report
 from ncccu.model import load_model
-from ncccu.runtime import ROOT, configure_randomness, device_for, file_hash, output_dir
+from ncccu.runtime import ROOT, configure_randomness, device_for, file_hash, output_dir, seed_worker
 from ncccu.submission import write_submission
 
 
@@ -62,20 +62,28 @@ def predict_multilabel(
         batch_size=config.batch,
         num_workers=config.workers,
         pin_memory=target.type == "cuda",
+        worker_init_fn=seed_worker,
     )
-    probabilities, _ = evaluate(
+    print(
+        f"预测配置 模型={model_path} | 训练轮次={checkpoint['epoch']} | "
+        f"输入={checkpoint['imgsz']} | 精度=FP{config.quantize} | "
+        f"batch={config.batch} | Study 聚合=概率均值 | gate={config.gate}",
+        flush=True,
+    )
+    probabilities, image_loss = evaluate(
         network, loader, target,
         quantize=config.quantize, channels_last=config.channels_last,
         augment=config.augment, verbose=True,
     )
     keys, scores, _ = aggregate(dataset, probabilities)
+    report = study_report(dataset, scores, gate=config.gate) if config.split == "valid" else None
     # 防止训练进程在推理期间覆写 best.pt，导致 CSV 与归档模型不对应。
     if file_hash(model_path) != model_hash:
         raise ValueError("推理期间模型权重发生变化，请选择固定检查点后重试")
     run = output_dir("predict", config.name)
     metadata = {**config.to_dict(), "model_sha256": model_hash}
     (run / "args.json").write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
     )
     if config.smoke_test:
         filename = "smoke_predictions.csv"
@@ -84,5 +92,20 @@ def predict_multilabel(
     else:
         filename = "valid_predictions.csv"
     write_submission(run / filename, keys, scores, config.gate)
+    save_study_probabilities(run / "study_probabilities.npz", dataset, scores)
+    if report is not None:
+        report.update(
+            image_val_loss=image_loss,
+            model_sha256=model_hash,
+            checkpoint_epoch=checkpoint["epoch"],
+        )
+        (run / "validation_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
+        )
+        print(
+            f"验证 Study BCE={report['study_val_loss']:.5f} | "
+            f"Macro-AUC={report['macro_auc']} | Macro-F1={report['macro_f1']:.5f}",
+            flush=True,
+        )
     print(f"预测 {len(dataset)} 张影像 / {len(keys)} 次检查：{run / filename}", flush=True)
     return run

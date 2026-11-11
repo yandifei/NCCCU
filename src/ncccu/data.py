@@ -30,6 +30,7 @@ SMOKE_STUDIES = 16
 type ImageRow = dict[str, str]
 type StudyKey = tuple[str, str]
 type ImageTransform = Callable[[Image.Image], torch.Tensor]
+type StudySample = tuple[torch.Tensor, torch.Tensor, int]
 
 
 def read_chest_image(path: Path, imgsz: int) -> np.ndarray:
@@ -131,6 +132,31 @@ class ChestDataset(Dataset):
                 row for row in self.rows if (row["Subject_id"], row["Study_id"]) in selected
             ]
         self.targets = self._validate_rows()
+        self.study_keys: list[StudyKey] = []
+        self.study_indices: list[list[int]] = []
+        self.image_study_indices: list[int] = []
+        self.image_weights = self._index_studies()
+
+    def _index_studies(self) -> torch.Tensor:
+        """建立完整检查索引，令整轮逐图加权均值等于逐检查均值。"""
+        study_lookup: dict[StudyKey, int] = {}
+        for image_index, row in enumerate(self.rows):
+            key = row["Subject_id"], row["Study_id"]
+            if key not in study_lookup:
+                study_lookup[key] = len(self.study_keys)
+                self.study_keys.append(key)
+                self.study_indices.append([])
+            study_index = study_lookup[key]
+            self.study_indices[study_index].append(image_index)
+            self.image_study_indices.append(study_index)
+
+        # N/(S*k) 的全局归一化保留平均权重为 1，避免改变损失量级。
+        images_per_study = len(self.rows) / len(self.study_keys)
+        return torch.tensor(
+            [images_per_study / len(self.study_indices[index])
+             for index in self.image_study_indices],
+            dtype=torch.float32,
+        )
 
     def _validate_rows(self) -> list[torch.Tensor]:
         targets = []
@@ -171,3 +197,24 @@ class ChestDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, int]:
         image = image_tensor(self.image_path(self.rows[index]), self.imgsz, self.transform)
         return image, self.targets[index], index
+
+
+class StudyDataset(Dataset):
+    """按检查读取全部视图，共享逐图数据集的预处理和官方标签。"""
+
+    def __init__(self, image_dataset: ChestDataset) -> None:
+        self.image_dataset = image_dataset
+
+    def __len__(self) -> int:
+        return len(self.image_dataset.study_keys)
+
+    def __getitem__(self, index: int) -> StudySample:
+        image_indices = self.image_dataset.study_indices[index]
+        images = torch.stack([self.image_dataset[item][0] for item in image_indices])
+        target = self.image_dataset.targets[image_indices[0]]
+        return images, target, index
+
+
+def collate_studies(samples: list[StudySample]) -> list[StudySample]:
+    """保留各检查不同的视图数量，供训练逐检查计算损失。"""
+    return samples

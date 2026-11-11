@@ -1,4 +1,4 @@
-"""在代码中选择检查点与推理参数，预测完成后自动打包赛事材料。"""
+"""第五版预测入口，聚合检查的全部视图，保存概率并自动打包赛事材料。"""
 
 from ncccu.inference import predict_multilabel
 from push import package_prediction
@@ -7,7 +7,7 @@ from push import package_prediction
 # Windows 工作进程需要入口保护，避免重复加载模型和启动推理。
 if __name__ == "__main__":
     prediction_run = predict_multilabel(
-        model="./outputs/train/v4_fp32_lr3e5_512/weights/best.pt",  # 第四版按验证 AUC 选出的权重。
+        model="./outputs/train/v5_study_mean_512/weights/best.pt",  # 修改训练 name 后同步选择对应 best.pt。
         data="./datasets",  # 官方 CSV 和影像的根目录。
         split="test",  # test 自动打包，valid 仅输出验证集预测。
         device=0,  # PyTorch 中的 CUDA 设备编号。

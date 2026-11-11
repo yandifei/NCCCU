@@ -14,6 +14,7 @@ from ncccu.multilabel import (
     ROOT, CLASS_NAMES, ChestDataset, aggregate, device_for, evaluate, metrics, output_dir,
 )
 from ncccu.model import load_model
+from ncccu.evaluation import binary_auc, save_study_probabilities, study_report
 from ncccu.runtime import configure_randomness, seed_worker
 from ncccu.thresholds import f1_scores, optimize_thresholds, patient_folds
 
@@ -77,7 +78,7 @@ def plot_diagnostics(history: list[dict], result: dict, per_class: list[dict], r
 
 
 def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
-                     device: str | int = 0, batch: int = 16, workers: int = 3) -> Path:
+                     device: str | int = 0, batch: int = 1, workers: int = 3) -> Path:
     training_run, data = ROOT / training_run, ROOT / data
     config = json.loads((training_run / 'args.json').read_text(encoding='utf-8'))
     with (training_run / 'results.csv').open(encoding='utf-8', newline='') as file:
@@ -87,6 +88,7 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
     configure_randomness(config['seed'], config['deterministic'])
     device = device_for(device)
     weights = training_run / 'weights/best.pt'
+    weights_hash = file_hash(weights)
     model, checkpoint = load_model(weights, device)
     if checkpoint['smoke_test']:
         raise ValueError('请使用正式训练的最佳权重')
@@ -117,8 +119,7 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
     for index, class_name in enumerate(CLASS_NAMES):
         target, score = labels[:, index].astype(bool), scores[:, index]
         predicted = score >= result['class_thresholds'][index]
-        positive, negative = score[target, None], score[None, ~target]
-        auc = float(((positive > negative) + .5*(positive == negative)).mean())
+        auc = binary_auc(target.astype(int), score)
         tp, fp = int((target & predicted).sum()), int((~target & predicted).sum())
         fn, tn = int((target & ~predicted).sum()), int((~target & ~predicted).sum())
         per_class.append(dict(class_id=index+1, class_name=class_name, positives=int(target.sum()),
@@ -129,7 +130,7 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
     train_subjects = {row['Subject_id'] for row in train.rows}
     valid_subjects = {subject for subject, _ in keys}
     summary = dict(
-        weights=str(weights), weights_sha256=file_hash(weights), best_epoch=checkpoint['epoch'],
+        weights=str(weights), weights_sha256=weights_hash, best_epoch=checkpoint['epoch'],
         stopped_epoch=int(history[-1]['epoch']), configured_epochs=config['epochs'], patience=config['patience'],
         stale_epochs=int(history[-1]['epoch'])-checkpoint['epoch'],
         best_record=checkpoint['metrics'], final_record=history[-1],
@@ -142,11 +143,14 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
         grouped_oof_global_macro_f1=float(f1_scores(labels, scores, out_of_fold_global).mean()),
         grouped_oof_class_macro_f1=float(f1_scores(labels, scores, out_of_fold_class).mean()),
         fold_thresholds=fold_results, per_class=per_class,
+        study_diagnostics=study_report(valid, scores),
         train_valid_shared_patients=len(train_subjects & valid_subjects),
         image_sizes=dict(train=size_statistics(train), valid=size_statistics(valid)),
         comparison='probability >= threshold; among equal F1 candidates choose highest threshold',
         limitations='Thresholds are fitted on validation; model was also selected on validation. Grouped OOF only cross-fits thresholds, not model selection. Not an independent test estimate.',
     )
+    if file_hash(weights) != weights_hash:
+        raise ValueError('分析期间模型权重发生变化，请使用固定的 best.pt')
     run = output_dir('analysis', name)
     (run / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
     with (run / 'per_class.csv').open('w', encoding='utf-8', newline='') as file:
@@ -160,6 +164,7 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
             for index in range(10):
                 writer.writerow([subject, study, index+1, int(target[index]), float(values[index]), float(result['class_thresholds'][index])])
     np.savez_compressed(run / 'validation_scores.npz', labels=labels, scores=scores, folds=folds)
+    save_study_probabilities(run / 'study_probabilities.npz', valid, scores)
     plot_diagnostics(history, result, per_class, run)
     print(json.dumps({key: summary[key] for key in ('best_epoch', 'stopped_epoch', 'global_threshold', 'global_macro_f1',
                                                    'class_thresholds', 'class_macro_f1', 'grouped_oof_global_macro_f1',
@@ -171,9 +176,9 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
 # 直接修改配置；仅使用 train/valid，测试集不参与阈值拟合。
 if __name__ == '__main__':
     analyze_training(
-        training_run='./outputs/train/v4_fp32_lr3e5_512',
+        training_run='./outputs/train/v5_study_mean_512',
         data='./datasets',
-        name='v4_fp32_lr3e5_512_thresholds',  # 再次分析时改为未使用的目录名
+        name='v5_study_mean_512_thresholds',  # 再次分析时改为未使用的目录名
         device=0,
         batch=1,  # 与 predict.py 的 FP32 推理批量一致
         workers=3,
