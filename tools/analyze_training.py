@@ -176,9 +176,9 @@ def analyze_training(*, training_run: str | Path, data: str | Path, name: str,
 # 直接修改配置；仅使用 train/valid，测试集不参与阈值拟合。
 if __name__ == '__main__':
     analyze_training(
-        training_run='./outputs/train/v5_study_mean_512',
+        training_run='./outputs/train/v6_convnext_small_640',
         data='./datasets',
-        name='v5_study_mean_512_thresholds',  # 再次分析时改为未使用的目录名
+        name='v6_convnext_small_640_thresholds',  # 再次分析时改为未使用的目录名
         device=0,
         batch=1,  # 与 predict.py 的 FP32 推理批量一致
         workers=3,
